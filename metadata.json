@@ -1,0 +1,6 @@
+{
+  "name": "Nexora",
+  "description": "Local-first modular AI system that continuously improves through experience, memory, experimentation, and strategy synthesis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
