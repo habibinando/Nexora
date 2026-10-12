@@ -140,7 +140,7 @@ object DocumentTextExtractor {
         // Jika teks digital kosong atau sangat pendek, kemungkinan PDF scan/gambar!
         // Render halaman PDF menggunakan PdfRenderer bawaan Android dan ekstrak dengan OCR ML Kit.
         return try {
-            val ocrPdfText = extractPdfWithRendererOcr(context, uri, maxPages = 5)
+            val ocrPdfText = extractPdfWithRendererOcr(context, uri, maxPages = 10)
             if (ocrPdfText.isNotBlank()) {
                 TextExtractionResult(
                     fileName = fileName,
@@ -401,7 +401,7 @@ object DocumentTextExtractor {
      */
     private fun extractFromPlainText(context: Context, uri: Uri, fileName: String): TextExtractionResult {
         return try {
-            val maxChars = 32_768
+            val maxChars = 5_000_000
             val charBuffer = CharArray(maxChars)
             var charsRead = 0
             var isTruncated = false
