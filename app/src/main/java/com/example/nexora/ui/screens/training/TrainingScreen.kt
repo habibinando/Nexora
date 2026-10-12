@@ -72,7 +72,7 @@ fun TrainingScreen(
 
     // Neural Trainer UI States (Hyperparameters & Inference)
     var trainEpochs by remember { mutableFloatStateOf(25f) }
-    var trainLearningRate by remember { mutableFloatStateOf(0.05f) }
+    var trainLearningRate by remember { mutableFloatStateOf(0.001f) }
     var selectedRamProfileId by remember { mutableStateOf("150mb") }
     var selectedOptimizer by remember { mutableStateOf(OptimizerType.ADAMW) }
     var trainHiddenDim by remember { mutableIntStateOf(128) }
