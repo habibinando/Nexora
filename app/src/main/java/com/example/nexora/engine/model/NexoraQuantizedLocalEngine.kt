@@ -144,13 +144,14 @@ class NexoraQuantizedLocalEngine(
                     prompt = prompt,
                     context = context,
                     apiKey = effectiveApiKey,
-                    modelName = context.preferredModel.ifBlank { "gemini-2.5-flash" }
+                    modelName = context.preferredModel.ifBlank { "gemini-3.5-flash" }
                 ).collect { token ->
                     emit(token)
                 }
                 return@flow
             } catch (e: Exception) {
-                // If API fails or offline, fall through directly to on-device autonomous reasoning
+                // Report real API error honestly to user instead of silently hiding failure
+                emit("⚠️ **Pemberitahuan Gemini API**: ${e.message ?: "Koneksi ke server AI gagal"}\n\n")
             }
         }
 

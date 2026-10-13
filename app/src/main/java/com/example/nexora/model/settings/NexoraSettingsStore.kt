@@ -10,8 +10,15 @@ class NexoraSettingsStore private constructor(context: Context) {
 
     private val prefs: SharedPreferences = context.getSharedPreferences("nexora_settings_v3", Context.MODE_PRIVATE)
 
-    // 1. Strict Local-First (default: true)
-    private val _offlineEnforced = MutableStateFlow(prefs.getBoolean(KEY_OFFLINE_ENFORCED, true))
+    private val buildApiKey: String = try {
+        val k = com.example.BuildConfig.GEMINI_API_KEY
+        if (k.isNotBlank() && k != "MY_GEMINI_API_KEY") k else ""
+    } catch (_: Exception) { "" }
+
+    // 1. Strict Local-First (default: false when build API key is available for ChatGPT-like hybrid AI chat)
+    private val _offlineEnforced = MutableStateFlow(
+        prefs.getBoolean(KEY_OFFLINE_ENFORCED, buildApiKey.isBlank())
+    )
     val offlineEnforced: StateFlow<Boolean> = _offlineEnforced.asStateFlow()
 
     // 2. Non-thinking Mode (default: false)
@@ -35,10 +42,16 @@ class NexoraSettingsStore private constructor(context: Context) {
     val toolStates: StateFlow<Map<String, Boolean>> = _toolStates.asStateFlow()
 
     // 7. Gemini API Key & Model for authentic live AI generation
-    private val _geminiApiKey = MutableStateFlow(prefs.getString(KEY_GEMINI_API_KEY, "") ?: "")
+    private val _geminiApiKey = MutableStateFlow(
+        prefs.getString(KEY_GEMINI_API_KEY, null)?.ifBlank { null } ?: buildApiKey
+    )
     val geminiApiKey: StateFlow<String> = _geminiApiKey.asStateFlow()
 
-    private val _geminiModel = MutableStateFlow(prefs.getString(KEY_GEMINI_MODEL, "gemini-2.5-flash") ?: "gemini-2.5-flash")
+    private val _geminiModel = MutableStateFlow(
+        prefs.getString(KEY_GEMINI_MODEL, "gemini-3.5-flash")?.let {
+            if (it == "gemini-2.5-flash" || it == "gemini-2.0-flash" || it == "gemini-1.5-flash" || it.isBlank()) "gemini-3.5-flash" else it
+        } ?: "gemini-3.5-flash"
+    )
     val geminiModel: StateFlow<String> = _geminiModel.asStateFlow()
 
     // 8. Trained Weights Chat Mode (Default false until toggled or trained)

@@ -138,13 +138,14 @@ class TinyLlamaGGUFAdapter(
                     prompt = prompt,
                     context = enrichedContext,
                     apiKey = effectiveApiKey,
-                    modelName = context.preferredModel.ifBlank { "gemini-2.5-flash" }
+                    modelName = context.preferredModel.ifBlank { "gemini-3.5-flash" }
                 ).collect { token ->
                     emit(token)
                 }
                 return@flow
-            } catch (_: Exception) {
-                // Fall back to local on-device synthesis
+            } catch (e: Exception) {
+                // Report real API error honestly to user instead of silently hiding failure
+                emit("⚠️ **Pemberitahuan Gemini API**: ${e.message ?: "Koneksi ke server AI gagal"}\n\n")
             }
         }
 

@@ -115,12 +115,8 @@ class ExperimentEngine(
             var stepOutput = ""
             var executionError: String? = null
 
-            // Intentional test failure trigger on attempt 1 to demonstrate multi-strategy failure & synthesis
-            if (forceInitialFailureForTesting && attempt <= 2) {
-                executionError = "Simulated tool verification fault on step $attempt: Parameter divergence"
-                log("EXECUTION FAULT: $executionError")
-            } else {
-                for (toolName in currentStrategy.requiredTools) {
+            // Real execution through registered tools without simulated faults
+            for (toolName in currentStrategy.requiredTools) {
                     val canonicalName = toolRegistry.canonicalToolName(toolName)
                     val tool = toolRegistry.getTool(toolName)
                     if (tool != null && tool.isEnabled) {
@@ -189,7 +185,6 @@ class ExperimentEngine(
                         stepOutput = modelResult.text.trim()
                     }
                 }
-            }
 
             val duration = System.currentTimeMillis() - startTime
 

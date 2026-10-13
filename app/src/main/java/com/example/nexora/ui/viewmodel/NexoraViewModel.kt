@@ -573,25 +573,26 @@ class NexoraViewModel(application: Application) : AndroidViewModel(application) 
             if (settingsStore.useTrainedWeights.value && localNeuralTrainer.hasTrainedWeights()) {
                 activeGenerationJob = launch(Dispatchers.Default) {
                     try {
+                        val header = "⚡ [Bobot Neural Terlatih On-Device]\n"
+                        val fullStringBuilder = StringBuilder(header)
                         _streamingState.value = ThinkingStreamState(
-                            rawText = "",
-                            thinkingText = "Mengambil bobot neural terlatih (PyTorch ExecuTorch Tensor)...",
-                            isThinking = true
-                        )
-                        delay(200)
-                        _streamingState.value = ThinkingStreamState(
-                            rawText = "",
+                            rawText = header,
+                            answerText = header,
                             isThinking = false,
                             isFinishedThinking = true
                         )
-                        val generated = localNeuralTrainer.runTrainedInference(trimmed, maxTokens = 120)
-                        val responseText = "⚡ [Bobot Neural Terlatih On-Device]\n$generated"
-                        _streamingState.value = ThinkingStreamState(
-                            rawText = responseText,
-                            answerText = responseText,
-                            isFinishedThinking = true
-                        )
-                        dao.insertChatMessage(ChatMessageEntity(sender = "NEXORA", text = responseText))
+                        localNeuralTrainer.runTrainedInferenceStream(trimmed, maxTokens = 150).collect { charToken ->
+                            fullStringBuilder.append(charToken)
+                            val currentText = fullStringBuilder.toString()
+                            _streamingState.value = ThinkingStreamState(
+                                rawText = currentText,
+                                answerText = currentText,
+                                isThinking = false,
+                                isFinishedThinking = true
+                            )
+                        }
+                        val finalResponse = fullStringBuilder.toString()
+                        dao.insertChatMessage(ChatMessageEntity(sender = "NEXORA", text = finalResponse))
                     } catch (e: Exception) {
                         dao.insertChatMessage(
                             ChatMessageEntity(sender = "SYSTEM", text = "Inferensi bobot terlatih terhenti: ${e.message}")
@@ -676,6 +677,12 @@ class NexoraViewModel(application: Application) : AndroidViewModel(application) 
                     _streamingState.value = ThinkingStreamState()
                 }
             }
+        }
+    }
+
+    fun regenerateLastMessage() {
+        if (!_isGenerating.value && lastUserPrompt.isNotBlank()) {
+            sendMessage(lastUserPrompt)
         }
     }
 

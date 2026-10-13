@@ -6,6 +6,7 @@ import com.example.nexora.engine.training.TrainingBenchmarkResult
 import com.example.nexora.model.database.TrainingDataEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -797,6 +798,14 @@ class LocalNeuralTrainer(
     }
 
     /**
+     * Direct Inference Streaming with user prompt using trained weights.
+     */
+    fun runTrainedInferenceStream(prompt: String, maxTokens: Int = 120): Flow<String> {
+        val clean = prompt.trim()
+        return _model.generateStream(if (clean.isEmpty()) "Halo" else clean, maxChars = maxTokens, temperature = 0.7f)
+    }
+
+    /**
      * Export raw weights JSON string so user can copy/export directly.
      */
     fun exportWeightsJson(): String {
@@ -835,8 +844,8 @@ class LocalNeuralTrainer(
      */
     fun inspectExecuTorchEValueShape(prompt: String): String {
         val token = if (prompt.isNotEmpty()) _model.charToToken(prompt.first()) else 0
-        val dummyHidden = FloatArray(_model.hiddenDim)
-        val (eValueOutput, _) = _model.forwardEValue(token, dummyHidden)
+        val initialZeroHidden = FloatArray(_model.hiddenDim)
+        val (eValueOutput, _) = _model.forwardEValue(token, initialZeroHidden)
         val tensor = eValueOutput.toTensor()
         return "ExecuTorch EValue output shape: ${tensor.shape().joinToString("x")}"
     }

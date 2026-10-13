@@ -29,11 +29,9 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.nexora.ui.screens.chat.ChatScreen
 import com.example.nexora.ui.screens.dashboard.DashboardScreen
-import com.example.nexora.ui.screens.experiments.ExperimentsScreen
 import com.example.nexora.ui.screens.memory.MemoryScreen
 import com.example.nexora.ui.screens.models.ModelsScreen
 import com.example.nexora.ui.screens.settings.SettingsScreen
-import com.example.nexora.ui.screens.strategies.StrategiesScreen
 import com.example.nexora.ui.screens.tools.ToolsScreen
 import com.example.nexora.ui.screens.training.TrainingScreen
 import com.example.nexora.ui.viewmodel.NexoraViewModel
@@ -42,12 +40,10 @@ import com.example.ui.theme.*
 enum class NexoraScreen(val title: String, val icon: ImageVector) {
     Dashboard("Dashboard", Icons.Default.Dashboard),
     Chat("Chat", Icons.Default.Chat),
-    Experiments("Experiments", Icons.Default.Science),
-    Strategies("Strategies", Icons.Default.Lightbulb),
+    Training("Training", Icons.Default.ModelTraining),
     Memory("Memory", Icons.Default.Psychology),
     Tools("Tools", Icons.Default.Build),
     Models("Models", Icons.Default.Memory),
-    Training("Training", Icons.Default.ModelTraining),
     Settings("Settings", Icons.Default.Settings)
 }
 
@@ -96,8 +92,6 @@ class MainActivity : ComponentActivity() {
                                     when (route) {
                                         "chat" -> currentScreen = NexoraScreen.Chat
                                         "memory" -> currentScreen = NexoraScreen.Memory
-                                        "experiments" -> currentScreen = NexoraScreen.Training
-                                        "strategies" -> currentScreen = NexoraScreen.Training
                                         "tools" -> currentScreen = NexoraScreen.Tools
                                         "models" -> currentScreen = NexoraScreen.Models
                                         "training" -> currentScreen = NexoraScreen.Training
@@ -111,11 +105,7 @@ class MainActivity : ComponentActivity() {
                                 onNavigateToExperiments = { currentScreen = NexoraScreen.Training },
                                 onNavigateToSettings = { currentScreen = NexoraScreen.Settings }
                             )
-                            NexoraScreen.Experiments -> TrainingScreen(
-                                viewModel = viewModel,
-                                onBack = { currentScreen = NexoraScreen.Dashboard }
-                            )
-                            NexoraScreen.Strategies -> TrainingScreen(
+                            NexoraScreen.Training -> TrainingScreen(
                                 viewModel = viewModel,
                                 onBack = { currentScreen = NexoraScreen.Dashboard }
                             )
@@ -128,10 +118,6 @@ class MainActivity : ComponentActivity() {
                                 onBack = { currentScreen = NexoraScreen.Dashboard }
                             )
                             NexoraScreen.Models -> ModelsScreen(
-                                viewModel = viewModel,
-                                onBack = { currentScreen = NexoraScreen.Dashboard }
-                            )
-                            NexoraScreen.Training -> TrainingScreen(
                                 viewModel = viewModel,
                                 onBack = { currentScreen = NexoraScreen.Dashboard }
                             )

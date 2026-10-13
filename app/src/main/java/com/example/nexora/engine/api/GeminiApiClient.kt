@@ -31,11 +31,17 @@ class GeminiApiClient(
         prompt: String,
         context: ModelContext,
         apiKey: String,
-        modelName: String = "gemini-2.5-flash"
+        modelName: String = "gemini-3.5-flash"
     ): Flow<String> = flow {
         val cleanKey = apiKey.trim()
         if (cleanKey.isBlank()) {
             throw IllegalStateException("API Key belum terpasang. Masukkan Gemini API Key di Pengaturan untuk inferensi cerdas langsung dari model AI.")
+        }
+
+        val effectiveModel = if (modelName.isBlank() || modelName == "gemini-2.5-flash" || modelName == "gemini-2.0-flash" || modelName == "gemini-1.5-flash") {
+            "gemini-3.5-flash"
+        } else {
+            modelName
         }
 
         val requestJson = JSONObject()
@@ -91,7 +97,7 @@ class GeminiApiClient(
         }
         requestJson.put("generationConfig", genConfig)
 
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:streamGenerateContent?alt=sse&key=$cleanKey"
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$effectiveModel:streamGenerateContent?alt=sse&key=$cleanKey"
         val mediaType = "application/json; charset=utf-8".toMediaType()
         val body = requestJson.toString().toRequestBody(mediaType)
 

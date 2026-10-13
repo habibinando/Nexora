@@ -8,6 +8,8 @@ import org.json.JSONObject
 import org.pytorch.executorch.EValue
 import org.pytorch.executorch.Module
 import org.pytorch.executorch.Tensor
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import java.io.File
 import kotlin.math.exp
 import kotlin.math.ln
@@ -546,6 +548,101 @@ class CharRNNModel(
         }
 
         return generated.toString()
+    }
+
+    /**
+     * Autoregressive next-character text generation streaming character by character.
+     */
+    fun generateStream(prompt: String, maxChars: Int = 120, temperature: Float = 0.7f): Flow<String> = flow {
+        if (prompt.isEmpty()) return@flow
+        val tokens = prompt.map { charToToken(it) }.toIntArray()
+        val tape = forwardSequence(tokens)
+        var currentHidden = tape.hStates[tokens.size]
+
+        val wEmbData = wEmb.data.getFloatArray()
+        val wXhData = wXh.data.getFloatArray()
+        val wHhData = wHh.data.getFloatArray()
+        val bHData = bH.data.getFloatArray()
+        val wOutData = wOut.data.getFloatArray()
+        val bOutData = bOut.data.getFloatArray()
+
+        val rng = Random.Default
+        var lastSampledToken: Int? = null
+        var totalChars = 0
+
+        for (step in 0 until maxChars) {
+            if (lastSampledToken != null) {
+                val nextHidden = FloatArray(hiddenDim)
+                val embOffset = lastSampledToken * embedDim
+                for (i in 0 until hiddenDim) {
+                    var sum = bHData[i]
+                    val xhOffset = i * embedDim
+                    for (d in 0 until embedDim) {
+                        sum += wXhData[xhOffset + d] * wEmbData[embOffset + d]
+                    }
+                    val hhOffset = i * hiddenDim
+                    for (j in 0 until hiddenDim) {
+                        sum += wHhData[hhOffset + j] * currentHidden[j]
+                    }
+                    nextHidden[i] = kotlin.math.tanh(sum.toDouble()).toFloat()
+                }
+                currentHidden = nextHidden
+            }
+
+            val logits = FloatArray(vocabSize)
+            var maxZ = Float.NEGATIVE_INFINITY
+            val safeTemp = temperature.coerceAtLeast(0.01f)
+            for (v in 0 until vocabSize) {
+                var sum = bOutData[v]
+                val outOffset = v * hiddenDim
+                for (h in 0 until hiddenDim) {
+                    sum += wOutData[outOffset + h] * currentHidden[h]
+                }
+                val scaled = sum / safeTemp
+                logits[v] = scaled
+                if (scaled > maxZ) maxZ = scaled
+            }
+
+            val chosenToken: Int
+            if (safeTemp <= 0.05f) {
+                var bestV = 0
+                var bestVal = Float.NEGATIVE_INFINITY
+                for (v in 0 until vocabSize) {
+                    if (logits[v] > bestVal) {
+                        bestVal = logits[v]
+                        bestV = v
+                    }
+                }
+                chosenToken = bestV
+            } else {
+                var sumExp = 0.0
+                val probs = DoubleArray(vocabSize)
+                for (v in 0 until vocabSize) {
+                    val expVal = exp((logits[v] - maxZ).toDouble())
+                    probs[v] = expVal
+                    sumExp += expVal
+                }
+
+                val r = rng.nextDouble() * sumExp
+                var accum = 0.0
+                var sampled = 0
+                for (v in 0 until vocabSize) {
+                    accum += probs[v]
+                    if (accum >= r) {
+                        sampled = v
+                        break
+                    }
+                }
+                chosenToken = sampled
+            }
+
+            val nextChar = tokenToChar(chosenToken)
+            emit(nextChar.toString())
+            lastSampledToken = chosenToken
+            totalChars++
+
+            if (nextChar == '\n' && totalChars > 45) break
+        }
     }
 
     /**

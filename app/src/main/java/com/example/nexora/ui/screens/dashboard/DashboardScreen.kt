@@ -39,15 +39,13 @@ fun DashboardScreen(
     val activeModel by viewModel.activeModelInfo.collectAsStateWithLifecycle()
     val deviceMem by viewModel.deviceMemory.collectAsStateWithLifecycle()
     val memories by viewModel.allMemories.collectAsStateWithLifecycle()
-    val experiments by viewModel.allExperiments.collectAsStateWithLifecycle()
-    val strategies by viewModel.allStrategies.collectAsStateWithLifecycle()
+    val chatMessages by viewModel.chatMessages.collectAsStateWithLifecycle()
     val tools by viewModel.toolsState.collectAsStateWithLifecycle()
     val modules by viewModel.adapterModules.collectAsStateWithLifecycle()
     val versions by viewModel.modelVersions.collectAsStateWithLifecycle()
+    val trainingData by viewModel.trainingData.collectAsStateWithLifecycle()
     val isOffline by viewModel.offlineEnforced.collectAsStateWithLifecycle()
 
-    val successfulExp = experiments.count { it.isSuccess }
-    val failedExp = experiments.count { !it.isSuccess }
     val activeVersion = versions.firstOrNull { it.isCurrentActive }?.versionId ?: "v1.0"
 
     LazyColumn(
@@ -234,17 +232,15 @@ fun DashboardScreen(
             )
         }
 
-        // 8 Grid Navigation Buttons Required by Section 14
+        // Focused Navigation Cards
         item {
             val navItems = listOf(
-                NavButtonData("Chat", Icons.AutoMirrored.Filled.Chat, NexoraCyan, "chat", "Live streaming inference"),
-                NavButtonData("Memory", Icons.Default.Psychology, NexoraViolet, "memory", "${memories.size} persistent memories"),
-                NavButtonData("Experiments", Icons.Default.Science, NexoraEmerald, "experiments", "$successfulExp passed • $failedExp failed"),
-                NavButtonData("Strategies", Icons.Default.Lightbulb, NexoraAmber, "strategies", "${strategies.size} in library"),
-                NavButtonData("Tools", Icons.Default.Build, NexoraCyan, "tools", "${tools.size} registered"),
-                NavButtonData("Models", Icons.Default.Memory, NexoraViolet, "models", "Replaceable local weights"),
-                NavButtonData("Training", Icons.Default.ModelTraining, NexoraEmerald, "training", "${modules.size} adapters"),
-                NavButtonData("Settings", Icons.Default.Settings, TextSecondary, "settings", "Offline & retry controls")
+                NavButtonData("AI Chat", Icons.AutoMirrored.Filled.Chat, NexoraCyan, "chat", "Live streaming layaknya ChatGPT"),
+                NavButtonData("Neural Training", Icons.Default.ModelTraining, NexoraEmerald, "training", "Pelatihan on-device BPTT & PEFT"),
+                NavButtonData("Model Manager", Icons.Default.Memory, NexoraViolet, "models", "Inspeksi biner GGUF & aktivasi"),
+                NavButtonData("Memori & Data", Icons.Default.Psychology, NexoraAmber, "memory", "${memories.size} memori • ${trainingData.size} dataset"),
+                NavButtonData("Perkakas / Tools", Icons.Default.Build, NexoraCyan, "tools", "${tools.size} perkakas Python & utilitas"),
+                NavButtonData("Pengaturan", Icons.Default.Settings, TextSecondary, "settings", "Gemini API key & akselerasi CPU")
             )
 
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -265,10 +261,10 @@ fun DashboardScreen(
             }
         }
 
-        // System Telemetry Metrics Grid
+        // Telemetry Metrics Grid
         item {
             Text(
-                text = "Autonomous Intelligence State",
+                text = "Status Telemetri Sistem",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = TextPrimary
@@ -281,21 +277,21 @@ fun DashboardScreen(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 MetricCard(
-                    title = "Memories",
-                    value = memories.size.toString(),
-                    subtitle = "Survives restarts",
-                    icon = Icons.Default.Storage,
-                    accentColor = NexoraViolet,
-                    onClick = { onNavigate("memory") },
+                    title = "Neural Training",
+                    value = "${modules.size} Modul",
+                    subtitle = "${trainingData.size} Pasangan Dataset",
+                    icon = Icons.Default.ModelTraining,
+                    accentColor = NexoraEmerald,
+                    onClick = { onNavigate("training") },
                     modifier = Modifier.weight(1f)
                 )
                 MetricCard(
-                    title = "Experiments",
-                    value = experiments.size.toString(),
-                    subtitle = "$successfulExp Success / $failedExp Failed",
-                    icon = Icons.Default.AutoMode,
-                    accentColor = NexoraEmerald,
-                    onClick = { onNavigate("experiments") },
+                    title = "AI Chat",
+                    value = "${chatMessages.size} Pesan",
+                    subtitle = if (!isOffline) "Hybrid Cloud + On-Device" else "100% Offline",
+                    icon = Icons.AutoMirrored.Filled.Chat,
+                    accentColor = NexoraCyan,
+                    onClick = { onNavigate("chat") },
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -307,27 +303,27 @@ fun DashboardScreen(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 MetricCard(
-                    title = "Strategies",
-                    value = strategies.size.toString(),
-                    subtitle = "Library Heuristics",
-                    icon = Icons.Default.AccountTree,
-                    accentColor = NexoraAmber,
-                    onClick = { onNavigate("strategies") },
+                    title = "Basis Pengetahuan",
+                    value = "${memories.size} Memori",
+                    subtitle = "Tersimpan di SQLite",
+                    icon = Icons.Default.Storage,
+                    accentColor = NexoraViolet,
+                    onClick = { onNavigate("memory") },
                     modifier = Modifier.weight(1f)
                 )
                 MetricCard(
-                    title = "Modules & Adapters",
-                    value = modules.count { it.isEnabled }.toString(),
-                    subtitle = "${modules.size} Installed LoRAs",
-                    icon = Icons.Default.Extension,
-                    accentColor = NexoraCyan,
-                    onClick = { onNavigate("training") },
+                    title = "Hardware RAM",
+                    value = "${deviceMem.availableRamMb} MB",
+                    subtitle = "Tersedia dari ${deviceMem.totalRamMb} MB",
+                    icon = Icons.Default.Memory,
+                    accentColor = NexoraAmber,
+                    onClick = { onNavigate("models") },
                     modifier = Modifier.weight(1f)
                 )
             }
         }
 
-        // Recent Learning Feed
+        // Recent Activity Feed
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -335,18 +331,18 @@ fun DashboardScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Recent Experiments & Lessons",
+                    text = "Aktivitas Percakapan Terakhir",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary
                 )
-                TextButton(onClick = { onNavigate("experiments") }) {
-                    Text("View All", color = NexoraCyan)
+                TextButton(onClick = { onNavigate("chat") }) {
+                    Text("Buka Chat", color = NexoraCyan)
                 }
             }
         }
 
-        if (experiments.isEmpty()) {
+        if (chatMessages.isEmpty()) {
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -354,7 +350,7 @@ fun DashboardScreen(
                 ) {
                     Box(modifier = Modifier.padding(16.dp), contentAlignment = Alignment.Center) {
                         Text(
-                            "No experiments executed yet. Launch one from Chat or Experiments tab!",
+                            "Belum ada riwayat pesan. Mulai percakapan sekarang di tab Chat!",
                             color = TextSecondary,
                             style = MaterialTheme.typography.bodyMedium
                         )
@@ -362,18 +358,18 @@ fun DashboardScreen(
                 }
             }
         } else {
-            items(experiments.take(3)) { exp ->
+            items(chatMessages.takeLast(3).reversed()) { msg ->
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
                         .border(1.dp, DarkOutline.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
-                        .clickable { onNavigate("experiments") },
+                        .clickable { onNavigate("chat") },
                     colors = CardDefaults.cardColors(containerColor = DarkSurface),
                     shape = RoundedCornerShape(12.dp)
                 ) {
                     Column(
                         modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -381,31 +377,23 @@ fun DashboardScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = exp.experimentId,
+                                text = if (msg.sender == "USER") "Pengguna" else "Nexora AI",
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold,
-                                color = NexoraCyan
+                                color = if (msg.sender == "USER") NexoraCyan else NexoraEmerald
                             )
-                            StatusBadge(
-                                text = if (exp.isSuccess) "PASSED (${exp.evaluationScore}%)" else "FAILED",
-                                color = if (exp.isSuccess) NexoraEmerald else NexoraRose
+                            Text(
+                                text = "Tersimpan",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextMuted
                             )
                         }
                         Text(
-                            text = exp.goal,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold,
+                            text = msg.text.take(150),
+                            style = MaterialTheme.typography.bodySmall,
                             color = TextPrimary,
                             maxLines = 2
                         )
-                        if (exp.lessonLearned.isNotBlank()) {
-                            Text(
-                                text = "Learned: ${exp.lessonLearned}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary,
-                                maxLines = 2
-                            )
-                        }
                     }
                 }
             }

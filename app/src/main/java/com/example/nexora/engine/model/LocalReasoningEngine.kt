@@ -81,57 +81,138 @@ object LocalReasoningEngine {
                 appendLine("Arsitektur **Local-First (On-Device)** dan **Cloud-Centric** memiliki trade-off mendasar dalam hal privasi, latensi, biaya, dan kapasitas komputasi:")
                 appendLine()
                 appendLine("#### 1. Keunggulan Arsitektur Local-First (On-Device):")
-                appendLine("• **Kedaulatan Data & Privasi Mutlak**: Data pengguna (percakapan, kode, dokumen, telemetri) tidak pernah ditransmisikan melalui internet ke server pihak ketiga. Ini krusial untuk kerahasiaan data medis, finansial, dan personal.")
-                appendLine("• **Latensi Nol Jaringan (Zero Network Latency)**: Tidak ada ketergantungan pada round-trip time (RTT), latency handshake TLS/HTTPS, atau fluktuasi sinyal seluler/WiFi.")
-                appendLine("• **Ketahanan Operasional (Offline Resiliency)**: Aplikasi berfungsi penuh di area tanpa koneksi internet (remote, penerbangan, bunker, dsb).")
-                appendLine("• **Nol Biaya Operasional (Zero Marginal Cost)**: Tidak ada tagihan API per-token, kuota bulanan, atau biaya sewa GPU cloud.")
+                appendLine("• **Kedaulatan Data & Privasi Mutlak**: Data pengguna tidak pernah ditransmisikan melalui internet ke server pihak ketiga.")
+                appendLine("• **Latensi Nol Jaringan**: Tidak ada round-trip time (RTT) atau ketergantungan sinyal internet.")
+                appendLine("• **Ketahanan Operasional**: Berfungsi penuh offline di lingkungan tanpa konektivitas.")
+                appendLine("• **Nol Biaya Operasional**: Tidak ada tagihan per-token atau sewa server GPU.")
                 appendLine()
-                appendLine("#### 2. Keterbatasan & Tantangan Local-First di Perangkat Mobile:")
-                appendLine("• **Kapasitas Memori (VRAM/RAM)**: Smartphone umumnya memiliki RAM terbagi (shared memory) 4GB–12GB. Menjalankan model raksasa (70B parameter) tidak memungkinkan di HP saat ini.")
-                appendLine("• **Konsumsi Daya & Termal**: Komputasi inferensi intensif pada prosesor HP menghasilkan panas dan menguras daya baterai lebih cepat dibanding sekadar mengirim request HTTP ke server.")
+                appendLine("#### 2. Keterbatasan di Perangkat Mobile:")
+                appendLine("• **Kapasitas RAM**: Keterbatasan heap Android dan memori bersama (shared RAM).")
+                appendLine("• **Termal & Baterai**: Komputasi intensif menghasilkan panas dan membutuhkan daya prosesor.")
                 appendLine()
-                appendLine("#### 3. Keunggulan Arsitektur Cloud:")
-                appendLine("• Mampu menjalankan model skala ekstrem ( ratusan miliar parameter) dengan konteks jutaan token menggunakan klaster server H100/TPU.")
-                appendLine()
-                appendLine("#### 💡 Kesimpulan Strategis:")
-                appendLine("Masa depan kecerdasan buatan personal adalah **Local-First Autonomous Intelligence**: tugas pemrosesan privat, eksekusi perkakas deterministik, dan pengambilan keputusan personal ditangani secara lokal di perangkat, sehingga pengguna memiliki kendali penuh atas sistem tanpa ketergantungan pada penyedia cloud.")
+                appendLine("#### 💡 Kesimpulan:")
+                appendLine("Masa depan AI adalah pendekatan **hibrida cerdas**: komputasi privat dan pelatihan adapter on-device dilakukan lokal, sementara penalaran masif didelegasikan ke cloud jika diperlukan.")
             }
         }
 
-        // 5. Code request
-        if (lower.contains("buat kode") || lower.contains("buat script") || lower.contains("buat fungsi") || lower.contains("coding") || lower.contains("python")) {
+        // 5. Deep Neural Network, Training & Backpropagation Questions
+        if (lower.contains("backprop") || lower.contains("autograd") || lower.contains("gradient") ||
+            lower.contains("neural network") || lower.contains("bptt") || lower.contains("pelatihan")
+        ) {
             return buildString {
-                appendLine("Tentu! Berikut contoh solusi pemrograman yang terstruktur dan siap Anda jalankan:")
+                appendLine("### 🧠 Konsep & Cara Kerja Backpropagation Through Time (BPTT)")
                 appendLine()
-                appendLine("```python")
-                appendLine("# Contoh fungsi pemrosesan data lokal di Nexora")
-                appendLine("def process_items(items):")
-                appendLine("    result = [item.strip().upper() for item in items if len(item.strip()) > 0]")
-                appendLine("    return sorted(result)")
+                appendLine("**Backpropagation** adalah algoritma inti dalam deep learning untuk menghitung gradien parsial loss terhadap bobot jaringan menggunakan aturan rantai kalkulus (*chain rule*):")
                 appendLine()
-                appendLine("data = ['nexora', 'local-first', 'privacy', 'on-device']")
-                appendLine("print('Hasil pemrosesan:', process_items(data))")
-                appendLine("```")
+                appendLine("1. **Forward Pass (Penjalaran Maju)**:")
+                appendLine("   - Token karakter dipetakan ke vektor representasi via matriks embedding W_emb.")
+                appendLine("   - State rekuren dihitung per-timestep: h_t = tanh(W_xh * x_t + W_hh * h_{t-1} + b_h).")
+                appendLine("   - Logit probabilitas dihitung: z_t = W_out * h_t + b_out, lalu dinormalisasi dengan Softmax.")
                 appendLine()
-                appendLine("💡 *Tips*: Anda dapat langsung menguji kode di atas di chat ini dengan mengetik:")
-                appendLine("`python: print(sorted([x.upper() for x in ['nexora', 'local-first']]))`")
+                appendLine("2. **Perhitungan Cross-Entropy Loss**:")
+                appendLine("   - Loss = -(1/T) * sum_{t=1}^T ln(P(target_t)). Mengukur seberapa dekat prediksi probabilitas model dengan target asli.")
+                appendLine()
+                appendLine("3. **Backward Pass (BPTT)**:")
+                appendLine("   - Menghitung gradien balik dari langkah waktu t = T-1 mundur hingga t = 0.")
+                appendLine("   - Gradien logit: dL/dz_v = (p_v - 1_{v=target}) / T.")
+                appendLine("   - Gradien aktivasi tanh: dRaw = dh * (1 - h_t^2).")
+                appendLine("   - Gradien akumulasi bobot: dW_out, dW_hh, dW_xh, dW_emb.")
+                appendLine()
+                appendLine("4. **Pembaruan Parameter via Optimizer**:")
+                appendLine("   - Parameter diperbarui dengan optimizer (seperti AdamW, Adam, atau SGD) setelah dilakukan Gradient Clipping agar gradien tidak meledak (exploding gradients).")
+                appendLine()
+                appendLine("💡 *Di Nexora, proses ini dieksekusi nyata di memori ponsel menggunakan tensor Multik di tab Training.*")
             }
         }
 
-        // 6. General synthesis with deep analytical answer
+        // 6. Optimizers (AdamW, Adam, RMSprop, SGD)
+        if (lower.contains("adamw") || lower.contains("optimizer") || lower.contains("rmsprop") || lower.contains("sgd") || lower.contains("weight decay")) {
+            return buildString {
+                appendLine("### ⚙️ Perbandingan Optimizer: AdamW vs Adam vs RMSprop vs SGD")
+                appendLine()
+                appendLine("Optimizer menentukan bagaimana gradien digunakan untuk memperbarui bobot neural:")
+                appendLine()
+                appendLine("1. **AdamW (Decoupled Weight Decay - SOTA)**:")
+                appendLine("   - Memisahkan regularisasi L2 weight decay dari update momen adaptif.")
+                appendLine("   - Mencegah bobot model meledak secara numerik tanpa mendistorsi gradien asli.")
+                appendLine("   - Standar emas untuk pelatihan LLM dan arsitektur transformer modern.")
+                appendLine()
+                appendLine("2. **Adam (Adaptive Moment Estimation)**:")
+                appendLine("   - Menggabungkan Momentum (m_t, rata-rata bergerak gradien) dan RMSprop (v_t, rata-rata kuadrat gradien).")
+                appendLine("   - Memiliki koreksi bias untuk langkah-langkah awal pelatihan.")
+                appendLine()
+                appendLine("3. **RMSprop**:")
+                appendLine("   - Membagi gradien dengan akar rata-rata kuadrat terbobot eksponensial.")
+                appendLine("   - Sangat stabil untuk model rekuren (RNN / LSTM).")
+                appendLine()
+                appendLine("4. **SGD dengan Momentum**:")
+                appendLine("   - Memperbarui bobot langsung searah gradien rata-rata berbobot.")
+                appendLine("   - Sederhana dan efisien memori, namun membutuhkan penyesuaian learning rate yang teliti.")
+            }
+        }
+
+        // 7. Code request
+        if (lower.contains("buat kode") || lower.contains("buat script") || lower.contains("buat fungsi") || lower.contains("coding") || lower.contains("python") || lower.contains("kotlin")) {
+            val isKotlin = lower.contains("kotlin") || lower.contains("android")
+            return if (isKotlin) {
+                buildString {
+                    appendLine("Tentu! Berikut contoh implementasi fungsi Kotlin yang terstruktur dan idiomatik:")
+                    appendLine()
+                    appendLine("```kotlin")
+                    appendLine("// Fungsi pemrosesan list & tokenisasi teks di Kotlin")
+                    appendLine("fun cleanAndTokenize(input: String): List<String> {")
+                    appendLine("    return input.lowercase()")
+                    appendLine("        .split(Regex(\"[^a-zA-Z0-9_]+\"))")
+                    appendLine("        .filter { it.isNotBlank() }")
+                    appendLine("        .distinct()")
+                    appendLine("}")
+                    appendLine()
+                    appendLine("val tokens = cleanAndTokenize(\"Nexora On-Device Neural Training v4.0\")")
+                    appendLine("println(\"Hasil token: \$tokens\")")
+                    appendLine("```")
+                }
+            } else {
+                buildString {
+                    appendLine("Tentu! Berikut contoh skrip Python yang modular dan efisien:")
+                    appendLine()
+                    appendLine("```python")
+                    appendLine("# Fungsi pemrosesan data & normalisasi teks")
+                    appendLine("def process_text_tokens(text: str) -> list[str]:")
+                    appendLine("    words = [w.strip().lower() for w in text.split() if w.strip()]")
+                    appendLine("    return sorted(list(set(words)))")
+                    appendLine()
+                    appendLine("sample = 'Nexora local-first intelligence and neural training'")
+                    appendLine("print('Hasil pemrosesan:', process_text_tokens(sample))")
+                    appendLine("```")
+                    appendLine()
+                    appendLine("💡 *Tips*: Anda dapat langsung menguji kode Python di chat ini dengan mengetik:")
+                    appendLine("`python: print([x**2 for x in range(5)])`")
+                }
+            }
+        }
+
+        // 8. Transparent offline guidance (Strict honesty - no fake template answers)
         val memoryNote = if (context.recalledMemories.isNotEmpty()) {
-            "\n• *Memori Relevan*: " + context.recalledMemories.first()
+            "• *Pengetahuan Tersimpan di Memori*: " + context.recalledMemories.take(2).joinToString(" | ") + "\n\n"
         } else ""
 
         return buildString {
-            appendLine("### Analisis & Tanggapan: \"$clean\"")
+            appendLine("ℹ️ **Status: Mode 100% On-Device (Offline)**")
             appendLine()
-            appendLine("Berdasarkan evaluasi on-device:")
-            appendLine("1. **Inti Masalah**: Menganalisis parameter dan konteks dari topik yang Anda ajukan.")
-            appendLine("2. **Perspektif Teknis**: Pendekatan lokal mengutamakan verifikasi logika tanpa asumsi berlebih.$memoryNote")
-            appendLine("3. **Langkah yang Dapat Dilakukan**: Jika ini berkaitan dengan kalkulasi, skrip pemrograman, atau penyimpanan data permanen, gunakan fitur perkakas lokal yang tersedia di navigasi.")
+            if (memoryNote.isNotBlank()) append(memoryNote)
+            appendLine("Saat ini Nexora beroperasi secara lokal di perangkat tanpa koneksi ke cloud.")
             appendLine()
-            appendLine("Silakan ajukan perintah atau pertanyaan lebih spesifik jika Anda membutuhkan perhitungan angka, penulisan kode, atau pengujian eksperimen.")
+            appendLine("• **Untuk Kemampuan Chat Cerdas (Layaknya ChatGPT)**:")
+            appendLine("  Masukkan Gemini API Key di menu **Pengaturan** (atau konfigurasikan di Secrets panel). Model Gemini 3.5 Flash akan langsung aktif dengan streaming penalaran orisinal.")
+            appendLine()
+            appendLine("• **Untuk Inferensi Bobot Neural Mandiri (100% On-Device)**:")
+            appendLine("  Buka tab **Training** untuk melatih jaringan saraf tiruan (Char-RNN) dengan Backpropagation & optimizer AdamW. Setelah dilatih, Anda dapat mengaktifkan inferensi bobot terlatih langsung di chat.")
+            appendLine()
+            appendLine("• **Fitur Lokal yang Siap Digunakan Langsung**:")
+            appendLine("  - Kalkulasi matematika presisi (contoh: `hitung: 125 * 48` atau `sqrt(625)`)")
+            appendLine("  - Eksekusi kode Python lokal (contoh: `python: print([x**2 for x in range(5)])`)")
+            appendLine("  - Pencatatan memori SQLite (contoh: `simpan memori: <judul>, <isi>` atau `cari memori: <kata kunci>`)")
+            appendLine("  - Ekstraksi teks & OCR berkas (tekan tombol **+** di samping kolom input)")
         }
     }
 }

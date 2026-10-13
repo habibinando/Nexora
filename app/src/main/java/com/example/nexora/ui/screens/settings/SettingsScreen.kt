@@ -305,6 +305,32 @@ fun SettingsScreen(
                             modifier = Modifier.fillMaxWidth()
                         )
 
+                        Text(
+                            "Model AI Cloud (Aktif saat API Key terpasang):",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TextSecondary
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(
+                                "gemini-3.5-flash" to "Gemini 3.5 Flash",
+                                "gemini-3.1-pro-preview" to "Gemini 3.1 Pro"
+                            ).forEach { (mId, mLabel) ->
+                                val isSelected = currentModel == mId
+                                FilterChip(
+                                    selected = isSelected,
+                                    onClick = { viewModel.setGeminiModel(mId) },
+                                    label = { Text(mLabel, fontSize = 11.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = NexoraCyan.copy(alpha = 0.25f),
+                                        selectedLabelColor = NexoraCyan
+                                    )
+                                )
+                            }
+                        }
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
