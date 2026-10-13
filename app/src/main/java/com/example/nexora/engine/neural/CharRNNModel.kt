@@ -14,29 +14,47 @@ import kotlin.math.ln
 import kotlin.math.sqrt
 import kotlin.random.Random
 
-enum class OptimizerType(val displayName: String, val shortName: String, val description: String) {
-    ADAMW("AdamW (Decoupled Weight Decay - SOTA)", "AdamW", "Standar model modern, mencegah bobot meledak dengan susut bobot decoupled"),
-    ADAM("Adam (Adaptive Moments)", "Adam", "Momentum adaptif orde 1 & orde 2 standar"),
-    RMSPROP("RMSprop", "RMSprop", "Root Mean Square propagation adaptif untuk recurrent networks"),
-    SGD("SGD + Momentum", "SGD-M", "Stochastic Gradient Descent dengan momentum 0.9 & norm clipping")
+enum class OptimizerType(
+    val displayName: String,
+    val shortName: String,
+    val description: String,
+    /** Batas atas LR yang masih masuk akal untuk optimizer ini pada Char-RNN (dipakai untuk clamp + log). */
+    val maxRecommendedLearningRate: Float
+) {
+    ADAMW("AdamW (Decoupled Weight Decay - SOTA)", "AdamW", "Standar model modern, mencegah bobot meledak dengan susut bobot decoupled", 0.01f),
+    ADAM("Adam (Adaptive Moments)", "Adam", "Momentum adaptif orde 1 & orde 2 standar", 0.01f),
+    RMSPROP("RMSprop", "RMSprop", "Root Mean Square propagation adaptif untuk recurrent networks", 0.01f),
+    SGD("SGD + Momentum", "SGD-M", "Stochastic Gradient Descent dengan momentum 0.9 & norm clipping", 0.1f)
 }
 
+/** Hasil satu chunk (forward + backward, gradien sudah diakumulasi). */
+class ChunkResult(
+    val lossSum: Double,
+    val tokens: Int,
+    val correct: Int,
+    /** Hidden state terakhir chunk ini; dipakai sebagai h0 chunk berikutnya (truncated BPTT). */
+    val lastHidden: FloatArray
+)
+
+/** Hasil evaluasi forward-only atas satu sekuens penuh. */
+class EvalResult(
+    val lossSum: Double,
+    val tokens: Int,
+    val correct: Int
+)
+
 /**
- * Authentic On-Device Character-Level Recurrent Neural Network (Char-RNN).
- * Architecture:
- *   Char Token ID -> Embedding (d_model) -> Hidden Recurrent Step with Tanh -> Output Linear -> Softmax
+ * On-Device Character-Level Recurrent Neural Network (Char-RNN, vanilla tanh RNN).
+ * Arsitektur:
+ *   Char ID -> Embedding -> h_t = tanh(W_xh e + W_hh h_{t-1} + b_h) -> Linear -> Softmax
  *
- * Training Process:
- *   1. Forward pass computing explicit hidden state sequence.
- *   2. CrossEntropyLoss = -ln(P(target_char)).
- *   3. Explicit backward pass (BPTT / Autograd) computing dL/dWout, dL/dbout, dL/dWhh, dL/dWxh, dL/dWemb.
- *   4. Optimizer: SGD with Momentum and Adam (updates weights via Multik tensors).
- *   5. Persistence: Save/Load weights to private storage as JSON and binary.
+ * Training:
+ *   1. forwardSequence (hidden state boleh dibawa dari chunk sebelumnya = truncated BPTT)
+ *   2. accumulateGradients: BPTT analitik, gradien dijumlah ke buffer persisten
+ *   3. applyAccumulated: rata-rata per jumlah chunk, global-norm clipping, lalu update optimizer
+ *      (update dilewati jika gradien NaN/Inf)
  *
- * Anti-Gimmick Guarantee:
- *   - Zero Random() or Thread.sleep() for loss calculations.
- *   - verifyRealTraining() tests L2 norm difference before vs after optimizer step.
- *   - Real next-character autoregressive text generation from user prompts.
+ * Tidak ada angka palsu: semua loss/akurasi dihitung dari forward pass nyata.
  */
 class CharRNNModel(
     val vocab: List<Char> = DEFAULT_VOCAB,
@@ -47,7 +65,6 @@ class CharRNNModel(
     private val charToIdx: Map<Char, Int> = vocab.mapIndexed { idx, c -> c to idx }.toMap()
     private val idxToChar: Map<Int, Char> = vocab.mapIndexed { idx, c -> idx to c }.toMap()
 
-    // Weight Tensors
     // W_emb: [vocabSize, embedDim]
     var wEmb: D2Array<Float>
     // W_xh: [hiddenDim, embedDim]
@@ -61,41 +78,40 @@ class CharRNNModel(
     // b_out: [vocabSize]
     var bOut: D1Array<Float>
 
-    // Optimizer State Buffers (Adam 1st & 2nd moments, RMSprop/Momentum)
+    /** Norma gradien global (setelah dirata-rata, sebelum clipping) pada update terakhir. */
+    var lastGradNorm: Float = 0f
+        private set
+
+    /** Jumlah update yang dilewati karena gradien tidak finit (NaN/Inf). */
+    var skippedUpdates: Int = 0
+        private set
+
     private var adamStep = 0
-    private var m_wOut: FloatArray? = null
-    private var v_wOut: FloatArray? = null
-    private var m_bOut: FloatArray? = null
-    private var v_bOut: FloatArray? = null
-    private var m_wXh: FloatArray? = null
-    private var v_wXh: FloatArray? = null
-    private var m_wHh: FloatArray? = null
-    private var v_wHh: FloatArray? = null
-    private var m_bH: FloatArray? = null
-    private var v_bH: FloatArray? = null
-    private var m_wEmb: FloatArray? = null
-    private var v_wEmb: FloatArray? = null
+
+    /** Buffer gradien + momen optimizer untuk satu tensor. Dipakai ulang, tidak dialokasi per langkah. */
+    private class OptSlot(size: Int) {
+        val g = FloatArray(size)
+        val m = FloatArray(size)
+        val v = FloatArray(size)
+    }
+
+    // Urutan slot: 0 wEmb, 1 wXh, 2 wHh, 3 bH, 4 wOut, 5 bOut
+    private var slots: Array<OptSlot>? = null
 
     init {
         val rng = Random(42)
-        val embScale = 1.0f / sqrt(embedDim.toFloat())
-        val hiddenScale = 1.0f / sqrt(hiddenDim.toFloat())
-        val outScale = 1.0f / sqrt(vocabSize.toFloat())
+        fun uniform(n: Int, limit: Float): FloatArray =
+            FloatArray(n) { (rng.nextFloat() * 2f - 1f) * limit }
 
-        val embData = FloatArray(vocabSize * embedDim) { (rng.nextFloat() * 2f - 1f) * embScale }
-        wEmb = mk.ndarray(embData, vocabSize, embedDim)
-
-        val xhData = FloatArray(hiddenDim * embedDim) { (rng.nextFloat() * 2f - 1f) * hiddenScale }
-        wXh = mk.ndarray(xhData, hiddenDim, embedDim)
-
-        val hhData = FloatArray(hiddenDim * hiddenDim) { (rng.nextFloat() * 2f - 1f) * hiddenScale }
-        wHh = mk.ndarray(hhData, hiddenDim, hiddenDim)
-
+        // Embedding: skala 1/sqrt(embedDim).
+        wEmb = mk.ndarray(uniform(vocabSize * embedDim, 1.0f / sqrt(embedDim.toFloat())), vocabSize, embedDim)
+        // Xavier/Glorot uniform: limit = sqrt(6 / (fanIn + fanOut)).
+        wXh = mk.ndarray(uniform(hiddenDim * embedDim, sqrt(6.0f / (embedDim + hiddenDim))), hiddenDim, embedDim)
+        // W_hh: Xavier dikali 0.8 agar radius spektral sedikit < 1 (lebih stabil di awal untuk RNN tanh).
+        wHh = mk.ndarray(uniform(hiddenDim * hiddenDim, 0.8f * sqrt(6.0f / (hiddenDim + hiddenDim))), hiddenDim, hiddenDim)
         bH = mk.zeros<Float>(hiddenDim)
-
-        val outData = FloatArray(vocabSize * hiddenDim) { (rng.nextFloat() * 2f - 1f) * outScale }
-        wOut = mk.ndarray(outData, vocabSize, hiddenDim)
-
+        // W_out: fanIn = hiddenDim, fanOut = vocabSize.
+        wOut = mk.ndarray(uniform(vocabSize * hiddenDim, sqrt(6.0f / (hiddenDim + vocabSize))), vocabSize, hiddenDim)
         bOut = mk.zeros<Float>(vocabSize)
     }
 
@@ -112,9 +128,6 @@ class CharRNNModel(
     fun charToToken(c: Char): Int = charToIdx[c] ?: charToIdx['?'] ?: 0
     fun tokenToChar(idx: Int): Char = idxToChar[idx] ?: ' '
 
-    /**
-     * Compute L2 Frobenius Norm of W_out tensor to verify weight delta during training.
-     */
     fun computeWOutL2Norm(): Float {
         var sumSq = 0.0
         val data = wOut.data.getFloatArray()
@@ -124,13 +137,63 @@ class CharRNNModel(
         return sqrt(sumSq).toFloat()
     }
 
+    /** Buang gradien terakumulasi + state optimizer (dipanggil sebelum run baru / setelah restore bobot). */
+    fun resetOptimizerState() {
+        slots = null
+        adamStep = 0
+        lastGradNorm = 0f
+        skippedUpdates = 0
+    }
+
+    /** Buang gradien yang sudah diakumulasi tanpa meng-update bobot. */
+    fun discardAccumulatedGradients() {
+        slots?.let { clearGradients(it) }
+    }
+
+    private fun clearGradients(s: Array<OptSlot>) {
+        for (slot in s) java.util.Arrays.fill(slot.g, 0f)
+    }
+
+    private fun ensureSlots(): Array<OptSlot> {
+        val sizes = intArrayOf(
+            vocabSize * embedDim,
+            hiddenDim * embedDim,
+            hiddenDim * hiddenDim,
+            hiddenDim,
+            vocabSize * hiddenDim,
+            vocabSize
+        )
+        val cur = slots
+        if (cur != null && cur.size == sizes.size) {
+            var ok = true
+            for (i in sizes.indices) if (cur[i].g.size != sizes[i]) ok = false
+            if (ok) return cur
+        }
+        val created = Array(sizes.size) { OptSlot(sizes[it]) }
+        slots = created
+        return created
+    }
+
+    private fun argMax(a: FloatArray): Int {
+        var best = 0
+        var bestVal = Float.NEGATIVE_INFINITY
+        for (i in a.indices) {
+            if (a[i] > bestVal) {
+                bestVal = a[i]
+                best = i
+            }
+        }
+        return best
+    }
+
     /**
-     * Forward pass on a character index sequence [x_0, x_1, ..., x_{T-1}].
-     * Returns list of hidden states and logits at each timestep.
+     * Forward pass pada [x_0 .. x_{T-1}]. h0 (opsional) = hidden state awal (dibawa dari chunk sebelumnya);
+     * jika null dipakai vektor nol.
      */
-    fun forwardSequence(tokens: IntArray): ForwardTape {
+    fun forwardSequence(tokens: IntArray, h0: FloatArray? = null): ForwardTape {
         val T = tokens.size
-        val hStates = Array(T + 1) { FloatArray(hiddenDim) } // h[0] is zeros
+        val hStates = Array(T + 1) { FloatArray(hiddenDim) }
+        if (h0 != null) System.arraycopy(h0, 0, hStates[0], 0, minOf(h0.size, hiddenDim))
         val logits = Array(T) { FloatArray(vocabSize) }
         val probs = Array(T) { FloatArray(vocabSize) }
 
@@ -147,9 +210,9 @@ class CharRNNModel(
             val hNext = hStates[t + 1]
 
             // h_next = tanh(W_xh * emb(token) + W_hh * h_prev + b_h)
+            val embOffset = token * embedDim
             for (i in 0 until hiddenDim) {
                 var sum = bHData[i]
-                val embOffset = token * embedDim
                 val xhOffset = i * embedDim
                 for (d in 0 until embedDim) {
                     sum += wXhData[xhOffset + d] * wEmbData[embOffset + d]
@@ -158,7 +221,6 @@ class CharRNNModel(
                 for (j in 0 until hiddenDim) {
                     sum += wHhData[hhOffset + j] * hPrev[j]
                 }
-                // Tanh activation
                 hNext[i] = kotlin.math.tanh(sum.toDouble()).toFloat()
             }
 
@@ -175,7 +237,7 @@ class CharRNNModel(
                 if (sum > maxZ) maxZ = sum
             }
 
-            // Softmax
+            // Softmax stabil secara numerik
             var sumExp = 0.0
             val p = probs[t]
             for (v in 0 until vocabSize) {
@@ -193,8 +255,215 @@ class CharRNNModel(
     }
 
     /**
-     * Train on sequence with Cross-Entropy Loss & Analytical Backpropagation through time.
-     * Target tokens are the next-character tokens: targets[t] = tokens[t+1].
+     * Forward + BPTT satu chunk; gradien DIJUMLAHKAN ke buffer persisten (belum ada update bobot).
+     * Loss chunk = rata-rata cross-entropy per token; gradien chunk sudah dibagi T.
+     * Panggil applyAccumulated(chunksInBatch = jumlah chunk yang diakumulasi) untuk meng-update bobot.
+     * Gradien tidak dialirkan ke h0 (truncated BPTT).
+     */
+    fun accumulateGradients(
+        inputTokens: IntArray,
+        targetTokens: IntArray,
+        h0: FloatArray? = null
+    ): ChunkResult {
+        require(inputTokens.size == targetTokens.size) { "Input and target length mismatch" }
+        val T = inputTokens.size
+        if (T == 0) {
+            return ChunkResult(0.0, 0, 0, h0?.copyOf() ?: FloatArray(hiddenDim))
+        }
+
+        val tape = forwardSequence(inputTokens, h0)
+        val s = ensureSlots()
+        val dWemb = s[0].g
+        val dWxh = s[1].g
+        val dWhh = s[2].g
+        val dbh = s[3].g
+        val dWout = s[4].g
+        val dbout = s[5].g
+
+        val wOutData = wOut.data.getFloatArray()
+        val wHhData = wHh.data.getFloatArray()
+        val wXhData = wXh.data.getFloatArray()
+        val wEmbData = wEmb.data.getFloatArray()
+
+        // Loss + akurasi top-1 dari forward pass (sebelum update)
+        var lossSum = 0.0
+        var correct = 0
+        for (t in 0 until T) {
+            val target = targetTokens[t].coerceIn(0, vocabSize - 1)
+            lossSum += -ln(tape.probs[t][target].coerceAtLeast(1e-7f).toDouble())
+            if (argMax(tape.logits[t]) == target) correct++
+        }
+
+        val invT = 1.0f / T
+        val dh = FloatArray(hiddenDim)
+        val dRaw = FloatArray(hiddenDim)
+        var dhNext = FloatArray(hiddenDim)
+        var dhPrev = FloatArray(hiddenDim)
+
+        for (t in T - 1 downTo 0) {
+            val target = targetTokens[t].coerceIn(0, vocabSize - 1)
+            val p = tape.probs[t]
+            val hCur = tape.hStates[t + 1]
+            val hPrev = tape.hStates[t]
+            val token = inputTokens[t].coerceIn(0, vocabSize - 1)
+
+            // dL/dz_v = (p_v - 1{v==target}) / T ; sekaligus dW_out, db_out, dh = W_out^T dz
+            java.util.Arrays.fill(dh, 0f)
+            for (v in 0 until vocabSize) {
+                val d = (p[v] - (if (v == target) 1.0f else 0.0f)) * invT
+                dbout[v] += d
+                val off = v * hiddenDim
+                for (h in 0 until hiddenDim) {
+                    dWout[off + h] += d * hCur[h]
+                    dh[h] += wOutData[off + h] * d
+                }
+            }
+            for (h in 0 until hiddenDim) dh[h] += dhNext[h]
+
+            // dRaw = dh * (1 - tanh^2)
+            for (h in 0 until hiddenDim) {
+                val th = hCur[h]
+                val r = dh[h] * (1.0f - th * th)
+                dRaw[h] = r
+                dbh[h] += r
+            }
+
+            // dW_hh += dRaw * hPrev^T ; dhPrev = W_hh^T * dRaw
+            java.util.Arrays.fill(dhPrev, 0f)
+            for (i in 0 until hiddenDim) {
+                val r = dRaw[i]
+                val off = i * hiddenDim
+                for (j in 0 until hiddenDim) {
+                    dWhh[off + j] += r * hPrev[j]
+                    dhPrev[j] += wHhData[off + j] * r
+                }
+            }
+
+            // dW_xh += dRaw * emb^T ; dW_emb += W_xh^T * dRaw
+            val embOff = token * embedDim
+            for (i in 0 until hiddenDim) {
+                val r = dRaw[i]
+                val off = i * embedDim
+                for (d in 0 until embedDim) {
+                    dWxh[off + d] += r * wEmbData[embOff + d]
+                    dWemb[embOff + d] += r * wXhData[off + d]
+                }
+            }
+
+            val tmp = dhNext
+            dhNext = dhPrev
+            dhPrev = tmp
+        }
+
+        return ChunkResult(lossSum, T, correct, tape.hStates[T])
+    }
+
+    /**
+     * Update bobot dari gradien terakumulasi.
+     * - Gradien dirata-rata: dibagi chunksInBatch.
+     * - Global-norm clipping (satu norma untuk SEMUA tensor) ke maxGradNorm.
+     * - Jika norma NaN/Inf: update dilewati, gradien dibuang, return false.
+     */
+    fun applyAccumulated(
+        learningRate: Float,
+        optimizerType: OptimizerType = OptimizerType.ADAMW,
+        maxGradNorm: Float = 1.0f,
+        chunksInBatch: Int = 1
+    ): Boolean {
+        val s = ensureSlots()
+        val inv = 1.0f / chunksInBatch.coerceAtLeast(1)
+
+        var sumSq = 0.0
+        for (slot in s) {
+            val g = slot.g
+            for (i in g.indices) {
+                val x = g[i] * inv
+                sumSq += (x * x).toDouble()
+            }
+        }
+        val norm = sqrt(sumSq)
+        lastGradNorm = norm.toFloat()
+        if (norm.isNaN() || norm.isInfinite()) {
+            clearGradients(s)
+            skippedUpdates++
+            return false
+        }
+        val clip = if (norm > maxGradNorm && norm > 1e-12) (maxGradNorm / norm).toFloat() else 1.0f
+        val scale = inv * clip
+
+        adamStep++
+        val weights = arrayOf(
+            wEmb.data.getFloatArray(),
+            wXh.data.getFloatArray(),
+            wHh.data.getFloatArray(),
+            bH.data.getFloatArray(),
+            wOut.data.getFloatArray(),
+            bOut.data.getFloatArray()
+        )
+        for (k in 0 until 6) {
+            // Weight decay hanya untuk matriks (bukan bias: slot 3 dan 5)
+            applyOptimizerUpdate(weights[k], s[k], learningRate, optimizerType, scale, k != 3 && k != 5)
+        }
+        clearGradients(s)
+        return true
+    }
+
+    private fun applyOptimizerUpdate(
+        weights: FloatArray,
+        slot: OptSlot,
+        lr: Float,
+        optimizerType: OptimizerType,
+        gradScale: Float,
+        decay: Boolean
+    ) {
+        val g = slot.g
+        val m = slot.m
+        val v = slot.v
+        when (optimizerType) {
+            OptimizerType.ADAMW, OptimizerType.ADAM -> {
+                val beta1 = 0.9f
+                val beta2 = 0.999f
+                val eps = 1e-8f
+                val step = adamStep.coerceAtLeast(1)
+                val bc1 = (1.0 - Math.pow(beta1.toDouble(), step.toDouble())).toFloat()
+                val bc2 = (1.0 - Math.pow(beta2.toDouble(), step.toDouble())).toFloat()
+                val stepLr = lr * (sqrt(bc2) / bc1)
+                // AdamW: decoupled weight decay w <- w * (1 - lr * wd)
+                val keep = if (optimizerType == OptimizerType.ADAMW && decay) 1.0f - lr * 0.01f else 1.0f
+                for (i in weights.indices) {
+                    val gi = g[i] * gradScale
+                    val mi = beta1 * m[i] + (1f - beta1) * gi
+                    val vi = beta2 * v[i] + (1f - beta2) * gi * gi
+                    m[i] = mi
+                    v[i] = vi
+                    weights[i] = weights[i] * keep - stepLr * (mi / (sqrt(vi) + eps))
+                }
+            }
+            OptimizerType.RMSPROP -> {
+                val alpha = 0.99f
+                val eps = 1e-8f
+                for (i in weights.indices) {
+                    val gi = g[i] * gradScale
+                    val vi = alpha * v[i] + (1f - alpha) * gi * gi
+                    v[i] = vi
+                    weights[i] -= lr * (gi / (sqrt(vi) + eps))
+                }
+            }
+            OptimizerType.SGD -> {
+                val momentum = 0.9f
+                for (i in weights.indices) {
+                    val gi = g[i] * gradScale
+                    val mi = momentum * m[i] + gi
+                    m[i] = mi
+                    weights[i] -= lr * mi
+                }
+            }
+        }
+    }
+
+    /**
+     * Satu langkah latih penuh (1 chunk = 1 update). Dipertahankan untuk kompatibilitas;
+     * loop latih utama memakai accumulateGradients + applyAccumulated agar batch & hidden-carry nyata.
      */
     fun trainStep(
         inputTokens: IntArray,
@@ -206,213 +475,17 @@ class CharRNNModel(
         val T = inputTokens.size
         if (T == 0) return StepMetrics(0f, computeWOutL2Norm())
 
-        // 1. Forward
-        val tape = forwardSequence(inputTokens)
-
-        // 2. Compute Loss: L = - 1/T * sum_t ln(P(target_t))
-        var totalLoss = 0.0f
-        for (t in 0 until T) {
-            val target = targetTokens[t].coerceIn(0, vocabSize - 1)
-            val pTarget = tape.probs[t][target].coerceAtLeast(1e-7f)
-            totalLoss += -ln(pTarget)
-        }
-        val avgLoss = totalLoss / T
-
-        // 3. Backward Pass & Gradient Accumulators
-        val dWout = FloatArray(vocabSize * hiddenDim)
-        val dbout = FloatArray(vocabSize)
-        val dWxh = FloatArray(hiddenDim * embedDim)
-        val dWhh = FloatArray(hiddenDim * hiddenDim)
-        val dbh = FloatArray(hiddenDim)
-        val dWemb = FloatArray(vocabSize * embedDim)
-
-        val wOutData = wOut.data.getFloatArray()
-        val wHhData = wHh.data.getFloatArray()
-        val wXhData = wXh.data.getFloatArray()
-        val wEmbData = wEmb.data.getFloatArray()
-
-        var dhNext = FloatArray(hiddenDim)
-
-        // Backprop through time from t = T-1 down to 0
-        for (t in T - 1 downTo 0) {
-            val target = targetTokens[t].coerceIn(0, vocabSize - 1)
-            val p = tape.probs[t]
-            val hCurrent = tape.hStates[t + 1]
-            val hPrev = tape.hStates[t]
-            val token = inputTokens[t].coerceIn(0, vocabSize - 1)
-
-            // dL/dz_v = (p_v - 1{v == target}) / T
-            val dz = FloatArray(vocabSize)
-            for (v in 0 until vocabSize) {
-                dz[v] = (p[v] - (if (v == target) 1.0f else 0.0f)) / T
-                dbout[v] += dz[v]
-                val outOffset = v * hiddenDim
-                for (h in 0 until hiddenDim) {
-                    dWout[outOffset + h] += dz[v] * hCurrent[h]
-                }
-            }
-
-            // dh = W_out^T * dz + dhNext
-            val dh = FloatArray(hiddenDim)
-            for (h in 0 until hiddenDim) {
-                var sum = dhNext[h]
-                for (v in 0 until vocabSize) {
-                    sum += wOutData[v * hiddenDim + h] * dz[v]
-                }
-                dh[h] = sum
-            }
-
-            // dRaw = dh * (1 - tanh^2(sum)) = dh * (1 - hCurrent^2)
-            val dRaw = FloatArray(hiddenDim)
-            for (h in 0 until hiddenDim) {
-                val tanhVal = hCurrent[h]
-                dRaw[h] = dh[h] * (1.0f - tanhVal * tanhVal)
-                dbh[h] += dRaw[h]
-            }
-
-            // dWhh += dRaw * hPrev^T
-            for (i in 0 until hiddenDim) {
-                val offset = i * hiddenDim
-                val dR = dRaw[i]
-                for (j in 0 until hiddenDim) {
-                    dWhh[offset + j] += dR * hPrev[j]
-                }
-            }
-
-            // dWxh += dRaw * emb^T
-            val embOffset = token * embedDim
-            for (i in 0 until hiddenDim) {
-                val offset = i * embedDim
-                val dR = dRaw[i]
-                for (d in 0 until embedDim) {
-                    val g = dR * wEmbData[embOffset + d]
-                    dWxh[offset + d] += g
-                    // Backprop into embedding matrix
-                    dWemb[embOffset + d] += dR * wXhData[offset + d]
-                }
-            }
-
-            // dhPrev = W_hh^T * dRaw
-            val dhPrev = FloatArray(hiddenDim)
-            for (j in 0 until hiddenDim) {
-                var sum = 0.0f
-                for (i in 0 until hiddenDim) {
-                    sum += wHhData[i * hiddenDim + j] * dRaw[i]
-                }
-                dhPrev[j] = sum
-            }
-            dhNext = dhPrev
-        }
-
-        // 4. Update Weights via Selected Optimizer (Adam, RMSprop, or SGD) with Gradient Clipping
-        adamStep++
-        val wOutArr = wOut.data.getFloatArray()
-        val bOutArr = bOut.data.getFloatArray()
-        val wXhArr = wXh.data.getFloatArray()
-        val wHhArr = wHh.data.getFloatArray()
-        val bHArr = bH.data.getFloatArray()
-        val wEmbArr = wEmb.data.getFloatArray()
-
-        if (m_wOut == null || m_wOut!!.size != wOutArr.size) {
-            m_wOut = FloatArray(wOutArr.size)
-            v_wOut = FloatArray(wOutArr.size)
-            m_bOut = FloatArray(bOutArr.size)
-            v_bOut = FloatArray(bOutArr.size)
-            m_wXh = FloatArray(wXhArr.size)
-            v_wXh = FloatArray(wXhArr.size)
-            m_wHh = FloatArray(wHhArr.size)
-            v_wHh = FloatArray(wHhArr.size)
-            m_bH = FloatArray(bHArr.size)
-            v_bH = FloatArray(bHArr.size)
-            m_wEmb = FloatArray(wEmbArr.size)
-            v_wEmb = FloatArray(wEmbArr.size)
-        }
-
-        applyOptimizerUpdate(wOutArr, dWout, m_wOut!!, v_wOut!!, learningRate, optimizerType)
-        applyOptimizerUpdate(bOutArr, dbout, m_bOut!!, v_bOut!!, learningRate, optimizerType)
-        applyOptimizerUpdate(wXhArr, dWxh, m_wXh!!, v_wXh!!, learningRate, optimizerType)
-        applyOptimizerUpdate(wHhArr, dWhh, m_wHh!!, v_wHh!!, learningRate, optimizerType)
-        applyOptimizerUpdate(bHArr, dbh, m_bH!!, v_bH!!, learningRate, optimizerType)
-        applyOptimizerUpdate(wEmbArr, dWemb, m_wEmb!!, v_wEmb!!, learningRate, optimizerType)
-
-        val updatedL2 = computeWOutL2Norm()
-        return StepMetrics(loss = avgLoss, wOutL2Norm = updatedL2)
+        val r = accumulateGradients(inputTokens, targetTokens, null)
+        applyAccumulated(learningRate, optimizerType, 1.0f, 1)
+        return StepMetrics(
+            loss = (r.lossSum / r.tokens).toFloat(),
+            wOutL2Norm = computeWOutL2Norm(),
+            correct = r.correct,
+            tokens = r.tokens
+        )
     }
 
-    private fun applyOptimizerUpdate(
-        weights: FloatArray,
-        grads: FloatArray,
-        mState: FloatArray,
-        vState: FloatArray,
-        lr: Float,
-        optimizerType: OptimizerType,
-        maxNorm: Float = 2.0f
-    ) {
-        // Gradient clipping by norm
-        var gradNormSq = 0.0
-        for (g in grads) gradNormSq += (g * g).toDouble()
-        val gradNorm = sqrt(gradNormSq).toFloat()
-        val scale = if (gradNorm > maxNorm && gradNorm > 1e-6f) maxNorm / gradNorm else 1.0f
-
-        when (optimizerType) {
-            OptimizerType.ADAMW -> {
-                val beta1 = 0.9f
-                val beta2 = 0.999f
-                val eps = 1e-8f
-                val weightDecay = 0.01f
-                val step = adamStep.coerceAtLeast(1)
-                val biasCorrection1 = (1.0 - Math.pow(beta1.toDouble(), step.toDouble())).toFloat()
-                val biasCorrection2 = (1.0 - Math.pow(beta2.toDouble(), step.toDouble())).toFloat()
-                val stepLr = lr * (sqrt(biasCorrection2) / biasCorrection1)
-
-                for (i in weights.indices) {
-                    val g = grads[i] * scale
-                    mState[i] = beta1 * mState[i] + (1f - beta1) * g
-                    vState[i] = beta2 * vState[i] + (1f - beta2) * g * g
-                    // Decoupled weight decay: w = w * (1 - lr * weightDecay) - stepLr * (m / (sqrt(v) + eps))
-                    weights[i] = weights[i] * (1.0f - lr * weightDecay) - stepLr * (mState[i] / (sqrt(vState[i]) + eps))
-                }
-            }
-            OptimizerType.ADAM -> {
-                val beta1 = 0.9f
-                val beta2 = 0.999f
-                val eps = 1e-8f
-                val step = adamStep.coerceAtLeast(1)
-                val biasCorrection1 = (1.0 - Math.pow(beta1.toDouble(), step.toDouble())).toFloat()
-                val biasCorrection2 = (1.0 - Math.pow(beta2.toDouble(), step.toDouble())).toFloat()
-                val stepLr = lr * (sqrt(biasCorrection2) / biasCorrection1)
-
-                for (i in weights.indices) {
-                    val g = grads[i] * scale
-                    mState[i] = beta1 * mState[i] + (1f - beta1) * g
-                    vState[i] = beta2 * vState[i] + (1f - beta2) * g * g
-                    weights[i] -= stepLr * (mState[i] / (sqrt(vState[i]) + eps))
-                }
-            }
-            OptimizerType.RMSPROP -> {
-                val alpha = 0.99f
-                val eps = 1e-8f
-                for (i in weights.indices) {
-                    val g = grads[i] * scale
-                    vState[i] = alpha * vState[i] + (1f - alpha) * g * g
-                    weights[i] -= lr * (g / (sqrt(vState[i]) + eps))
-                }
-            }
-            OptimizerType.SGD -> {
-                val momentum = 0.9f
-                for (i in weights.indices) {
-                    val g = grads[i] * scale
-                    mState[i] = momentum * mState[i] + g
-                    weights[i] -= lr * mState[i]
-                }
-            }
-        }
-    }
-
-    /**
-     * Pure forward evaluation step (without backprop or weight updates).
-     * Computes real Cross-Entropy Loss on validation tokens efficiently.
-     */
+    /** Forward-only pada satu chunk (tanpa backprop / update). */
     fun evaluateStep(
         inputTokens: IntArray,
         targetTokens: IntArray
@@ -422,37 +495,59 @@ class CharRNNModel(
         if (T == 0) return StepMetrics(0f, computeWOutL2Norm())
 
         val tape = forwardSequence(inputTokens)
-        var totalLoss = 0.0f
+        var totalLoss = 0.0
+        var correct = 0
         for (t in 0 until T) {
             val target = targetTokens[t].coerceIn(0, vocabSize - 1)
-            val pTarget = tape.probs[t][target].coerceAtLeast(1e-7f)
-            totalLoss += -ln(pTarget)
+            totalLoss += -ln(tape.probs[t][target].coerceAtLeast(1e-7f).toDouble())
+            if (argMax(tape.logits[t]) == target) correct++
         }
-        val avgLoss = totalLoss / T
-        return StepMetrics(loss = avgLoss, wOutL2Norm = computeWOutL2Norm())
+        return StepMetrics(
+            loss = (totalLoss / T).toFloat(),
+            wOutL2Norm = computeWOutL2Norm(),
+            correct = correct,
+            tokens = T
+        )
     }
 
-    private fun clipAndApplyGradient(weights: FloatArray, grads: FloatArray, lr: Float, maxNorm: Float = 2.0f) {
-        var gradNormSq = 0.0
-        for (g in grads) gradNormSq += (g * g).toDouble()
-        val gradNorm = sqrt(gradNormSq).toFloat()
-        val scale = if (gradNorm > maxNorm && gradNorm > 1e-6f) maxNorm / gradNorm else 1.0f
-
-        for (i in weights.indices) {
-            weights[i] -= lr * grads[i] * scale
+    /**
+     * Evaluasi forward-only atas SELURUH sekuens (dipecah per chunk dengan hidden state dibawa),
+     * mengembalikan jumlah loss, jumlah token, dan jumlah prediksi top-1 yang benar.
+     * Loss rata-rata yang benar = lossSum / tokens (token-weighted), bukan rata-rata antar-sampel.
+     */
+    fun evaluateSequence(tokens: IntArray, chunkSize: Int = 128): EvalResult {
+        val n = tokens.size
+        if (n < 2) return EvalResult(0.0, 0, 0)
+        val cs = chunkSize.coerceAtLeast(2)
+        var h: FloatArray? = null
+        var s = 0
+        var lossSum = 0.0
+        var correct = 0
+        var count = 0
+        while (s < n - 1) {
+            val e = minOf(s + cs, n - 1)
+            val inp = tokens.copyOfRange(s, e)
+            val tgt = tokens.copyOfRange(s + 1, e + 1)
+            val tape = forwardSequence(inp, h)
+            for (t in inp.indices) {
+                val target = tgt[t].coerceIn(0, vocabSize - 1)
+                lossSum += -ln(tape.probs[t][target].coerceAtLeast(1e-7f).toDouble())
+                if (argMax(tape.logits[t]) == target) correct++
+            }
+            count += inp.size
+            h = tape.hStates[inp.size]
+            s = e
         }
+        return EvalResult(lossSum, count, correct)
     }
 
     /**
      * Autoregressive next-character text generation.
-     * Evaluates prompt sequence, uses the terminal hidden state to sample the first continuation
-     * character, and autoregressively feeds sampled tokens to advance hidden state.
      */
     fun generate(prompt: String, maxChars: Int = 80, temperature: Float = 0.7f): String {
         if (prompt.isEmpty()) return ""
         val tokens = prompt.map { charToToken(it) }.toIntArray()
         val tape = forwardSequence(tokens)
-        // Tape.hStates[tokens.size] is the hidden state after consuming the entire prompt.
         var currentHidden = tape.hStates[tokens.size]
 
         val generated = StringBuilder(prompt)
@@ -468,7 +563,6 @@ class CharRNNModel(
         var lastSampledToken: Int? = null
 
         for (step in 0 until maxChars) {
-            // If this is step > 0, transition hidden state by feeding the previously generated token
             if (lastSampledToken != null) {
                 val nextHidden = FloatArray(hiddenDim)
                 val embOffset = lastSampledToken * embedDim
@@ -487,7 +581,6 @@ class CharRNNModel(
                 currentHidden = nextHidden
             }
 
-            // Compute Logits from currentHidden (W_out * currentHidden + b_out)
             val logits = FloatArray(vocabSize)
             var maxZ = Float.NEGATIVE_INFINITY
             val safeTemp = temperature.coerceAtLeast(0.01f)
@@ -502,20 +595,10 @@ class CharRNNModel(
                 if (scaled > maxZ) maxZ = scaled
             }
 
-            // Greedy mode if temperature is minimal
             val chosenToken: Int
             if (safeTemp <= 0.05f) {
-                var bestV = 0
-                var bestVal = Float.NEGATIVE_INFINITY
-                for (v in 0 until vocabSize) {
-                    if (logits[v] > bestVal) {
-                        bestVal = logits[v]
-                        bestV = v
-                    }
-                }
-                chosenToken = bestV
+                chosenToken = argMax(logits)
             } else {
-                // Softmax
                 var sumExp = 0.0
                 val probs = DoubleArray(vocabSize)
                 for (v in 0 until vocabSize) {
@@ -523,8 +606,6 @@ class CharRNNModel(
                     probs[v] = expVal
                     sumExp += expVal
                 }
-
-                // Sample token
                 val r = rng.nextDouble() * sumExp
                 var accum = 0.0
                 var sampled = 0
@@ -549,25 +630,52 @@ class CharRNNModel(
     }
 
     /**
-     * Serialize full model weights to JSON file for export and persistent reload.
+     * Simpan bobot ke JSON (format sama seperti sebelumnya, kompatibel import/export).
+     * Streaming (tanpa JSONArray raksasa di heap) dan ATOMIC: tulis ke .tmp lalu rename,
+     * sehingga crash/kill di tengah penulisan tidak merusak file bobot lama.
+     * Melempar IllegalStateException jika ada bobot NaN/Inf (file lama tetap utuh).
      */
     fun saveToFile(file: File) {
-        file.parentFile?.mkdirs()
-        val json = JSONObject()
-        json.put("vocab", vocab.joinToString(""))
-        json.put("embedDim", embedDim)
-        json.put("hiddenDim", hiddenDim)
-        json.put("paramsCount", countParameters())
-        json.put("savedAt", System.currentTimeMillis())
+        val parent = file.parentFile
+        parent?.mkdirs()
+        val tmp = File(parent, file.name + ".tmp")
+        try {
+            java.io.BufferedWriter(java.io.OutputStreamWriter(java.io.FileOutputStream(tmp), Charsets.UTF_8), 1 shl 16).use { w ->
+                w.write("{\"vocab\":")
+                w.write(JSONObject.quote(vocab.joinToString("")))
+                w.write(",\"embedDim\":$embedDim,\"hiddenDim\":$hiddenDim,\"paramsCount\":${countParameters()},\"savedAt\":${System.currentTimeMillis()}")
+                writeFloatArray(w, "wEmb", wEmb.data.getFloatArray())
+                writeFloatArray(w, "wXh", wXh.data.getFloatArray())
+                writeFloatArray(w, "wHh", wHh.data.getFloatArray())
+                writeFloatArray(w, "bH", bH.data.getFloatArray())
+                writeFloatArray(w, "wOut", wOut.data.getFloatArray())
+                writeFloatArray(w, "bOut", bOut.data.getFloatArray())
+                w.write("}")
+            }
+        } catch (e: Exception) {
+            tmp.delete()
+            throw e
+        }
+        if (!tmp.renameTo(file)) {
+            file.delete()
+            if (!tmp.renameTo(file)) {
+                tmp.copyTo(file, overwrite = true)
+                tmp.delete()
+            }
+        }
+    }
 
-        json.put("wEmb", floatArrayToJson(wEmb.data.getFloatArray()))
-        json.put("wXh", floatArrayToJson(wXh.data.getFloatArray()))
-        json.put("wHh", floatArrayToJson(wHh.data.getFloatArray()))
-        json.put("bH", floatArrayToJson(bH.data.getFloatArray()))
-        json.put("wOut", floatArrayToJson(wOut.data.getFloatArray()))
-        json.put("bOut", floatArrayToJson(bOut.data.getFloatArray()))
-
-        file.writeText(json.toString())
+    private fun writeFloatArray(w: java.io.Writer, name: String, arr: FloatArray) {
+        w.write(",\"$name\":[")
+        for (i in arr.indices) {
+            val f = arr[i]
+            if (f.isNaN() || f.isInfinite()) {
+                throw IllegalStateException("Bobot $name[$i] tidak finit (NaN/Inf); penyimpanan dibatalkan")
+            }
+            if (i > 0) w.write(",")
+            w.write(f.toString())
+        }
+        w.write("]")
     }
 
     /**
@@ -580,8 +688,6 @@ class CharRNNModel(
             val savedVocab = json.optString("vocab", "")
             val savedEmbed = json.optInt("embedDim", -1)
             val savedHidden = json.optInt("hiddenDim", -1)
-            // Validasi ketat: vocab, embedDim, hiddenDim harus cocok dengan instance ini.
-            // Jika tidak cocok, pemuatan akan salah bentuk (array size mismatch) -> tolak.
             val dimsMatch = savedEmbed == embedDim && savedHidden == hiddenDim
             if (savedVocab.isNotEmpty() && savedVocab.length == vocab.size && dimsMatch) {
                 copyJsonToFloatArray(json.getJSONArray("wEmb"), wEmb.data.getFloatArray())
@@ -607,12 +713,6 @@ class CharRNNModel(
         }
     }
 
-    private fun floatArrayToJson(arr: FloatArray): org.json.JSONArray {
-        val jArr = org.json.JSONArray()
-        for (f in arr) jArr.put(f.toDouble())
-        return jArr
-    }
-
     private fun copyJsonToFloatArray(jArr: org.json.JSONArray, dest: FloatArray) {
         val len = minOf(jArr.length(), dest.size)
         for (i in 0 until len) {
@@ -621,7 +721,7 @@ class CharRNNModel(
     }
 
     /**
-     * Converts current weights to PyTorch ExecuTorch Tensor structures for interoperability.
+     * Konversi bobot ke struktur Tensor ExecuTorch (in-memory). Ini BUKAN ekspor file .pte.
      */
     fun toExecuTorchTensors(): Map<String, Tensor> {
         val outTensor = Tensor.fromBlob(wOut.data.getFloatArray(), longArrayOf(vocabSize.toLong(), hiddenDim.toLong()))
@@ -641,7 +741,7 @@ class CharRNNModel(
     }
 
     /**
-     * Forward pass step using PyTorch ExecuTorch EValue container.
+     * Forward pass satu langkah memakai container EValue ExecuTorch.
      */
     fun forwardEValue(inputToken: Int, lastHidden: FloatArray): Pair<EValue, FloatArray> {
         val tokenTensor = Tensor.fromBlob(floatArrayOf(inputToken.toFloat()), longArrayOf(1))
@@ -691,17 +791,23 @@ class CharRNNModel(
             " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?:;-_'\"/()[]{}+=*\n"
         ).toList()
 
-        /**
-         * Ukuran kosakata default yang SESUNGGUHNYA (dihitung dari DEFAULT_VOCAB, bukan hardcode).
-         * Nilai ini = 84. Semua lapisan UI/PEFT harus merujuk ke sini atau ke model.vocabSize,
-         * tidak boleh menulis angka literal (mis. 96) secara terpisah.
-         */
+        /** Ukuran kosakata default yang SESUNGGUHNYA (dihitung dari DEFAULT_VOCAB). */
         val DEFAULT_VOCAB_SIZE: Int = DEFAULT_VOCAB.size
 
         /**
-         * Ekstrak seluruh karakter unik (unique characters) nyata dari dataset secara otomatis.
-         * Selalu menyertakan whitespace dasar (' ', '\n', '?') sebagai jangkar tokenisasi.
+         * Estimasi RAM NYATA untuk model + gradien + momen optimizer (4 salinan float32) + tape forward satu chunk.
+         * Ini angka perhitungan dari jumlah parameter, bukan label profil.
          */
+        fun estimateTrainingMemoryMb(vocabSize: Int, embedDim: Int, hiddenDim: Int, chunkSize: Int): Float {
+            val v = vocabSize.toLong()
+            val e = embedDim.toLong()
+            val h = hiddenDim.toLong()
+            val params = v * e + h * e + h * h + h + v * h + v
+            val optimizerBytes = params * 4L * 4L
+            val tapeBytes = chunkSize.toLong() * (h + 2L * v) * 4L
+            return (optimizerBytes + tapeBytes) / (1024f * 1024f)
+        }
+
         fun buildVocabFromDataset(texts: Iterable<String>): List<Char> {
             val charSet = linkedSetOf(' ', '\n', '?')
             for (text in texts) {
@@ -715,9 +821,8 @@ class CharRNNModel(
         fun fitVocab(texts: Iterable<String>): List<Char> = buildVocabFromDataset(texts)
 
         /**
-         * Memeriksa apakah teks dataset memiliki karakter di luar kosakata model saat ini.
-         * Jika ada karakter baru, buat model baru dengan vocab yang diperluas,
-         * sembari mentransfer bobot lama yang beririsan sehingga hasil latihan sebelumnya tidak hilang.
+         * Jika dataset punya karakter di luar kosakata model, bangun model baru dengan vocab diperluas
+         * dan transfer bobot lama yang beririsan.
          */
         fun expandVocabIfNeeded(
             currentModel: CharRNNModel,
@@ -742,7 +847,6 @@ class CharRNNModel(
                 hiddenDim = currentModel.hiddenDim
             )
 
-            // Transfer bobot embedding & output projection untuk token lama yang bersesuaian
             val oldWEmb = currentModel.wEmb.data.getFloatArray()
             val newWEmb = newModel.wEmb.data.getFloatArray()
             val oldWOut = currentModel.wOut.data.getFloatArray()
@@ -752,14 +856,11 @@ class CharRNNModel(
 
             for ((oldIdx, char) in currentModel.vocab.withIndex()) {
                 val newIdx = newModel.charToToken(char)
-                // Transfer embedding baris token
                 System.arraycopy(oldWEmb, oldIdx * currentModel.embedDim, newWEmb, newIdx * newModel.embedDim, currentModel.embedDim)
-                // Transfer output projection baris token
                 System.arraycopy(oldWOut, oldIdx * currentModel.hiddenDim, newWOut, newIdx * newModel.hiddenDim, currentModel.hiddenDim)
                 newBOut[newIdx] = oldBOut[oldIdx]
             }
 
-            // Transfer parameter recurrent W_xh, W_hh, b_h secara utuh (dimensi hidden/embed sama)
             System.arraycopy(currentModel.wXh.data.getFloatArray(), 0, newModel.wXh.data.getFloatArray(), 0, currentModel.hiddenDim * currentModel.embedDim)
             System.arraycopy(currentModel.wHh.data.getFloatArray(), 0, newModel.wHh.data.getFloatArray(), 0, currentModel.hiddenDim * currentModel.hiddenDim)
             System.arraycopy(currentModel.bH.data.getFloatArray(), 0, newModel.bH.data.getFloatArray(), 0, currentModel.hiddenDim)
@@ -769,10 +870,8 @@ class CharRNNModel(
         }
 
         /**
-         * Factory: membangun model dengan vocab & dimensi yang tersimpan di file,
-         * lalu memuat bobotnya. Mengembalikan null jika file tidak valid / tidak ada.
-         * Ini mengatasi kasus vocabSize/embedDim/hiddenDim di file berbeda dari default
-         * (sebelumnya loadFromFile hanya kompatibel jika vocab persis sama dengan default).
+         * Bangun model dengan vocab & dimensi yang tersimpan di file, lalu muat bobotnya.
+         * Null jika file tidak valid / tidak ada.
          */
         fun fromFile(file: File): CharRNNModel? {
             if (!file.exists() || file.length() == 0L) return null
@@ -793,9 +892,7 @@ class CharRNNModel(
         }
 
         /**
-         * Strict Anti-Gimmick Verification function required by specification:
-         * Prints to Logcat: L2-norm of W_out BEFORE vs AFTER 1 training step.
-         * Throws error if norm is unchanged (which would prove fake training).
+         * Verifikasi: L2-norm W_out harus berubah setelah 1 langkah latih. Jika tidak, training palsu.
          */
         fun verifyRealTraining(): Boolean {
             val model = CharRNNModel(embedDim = 16, hiddenDim = 32)
@@ -829,5 +926,7 @@ data class ForwardTape(
 
 data class StepMetrics(
     val loss: Float,
-    val wOutL2Norm: Float
+    val wOutL2Norm: Float,
+    val correct: Int = 0,
+    val tokens: Int = 0
 )
