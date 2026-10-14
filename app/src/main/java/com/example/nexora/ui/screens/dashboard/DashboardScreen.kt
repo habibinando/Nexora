@@ -235,12 +235,12 @@ fun DashboardScreen(
         // Focused Navigation Cards
         item {
             val navItems = listOf(
-                NavButtonData("AI Chat", Icons.AutoMirrored.Filled.Chat, NexoraCyan, "chat", "Live streaming layaknya ChatGPT"),
-                NavButtonData("Neural Training", Icons.Default.ModelTraining, NexoraEmerald, "training", "Pelatihan on-device BPTT & PEFT"),
-                NavButtonData("Model Manager", Icons.Default.Memory, NexoraViolet, "models", "Inspeksi biner GGUF & aktivasi"),
-                NavButtonData("Memori & Data", Icons.Default.Psychology, NexoraAmber, "memory", "${memories.size} memori • ${trainingData.size} dataset"),
-                NavButtonData("Perkakas / Tools", Icons.Default.Build, NexoraCyan, "tools", "${tools.size} perkakas Python & utilitas"),
-                NavButtonData("Pengaturan", Icons.Default.Settings, TextSecondary, "settings", "Gemini API key & akselerasi CPU")
+                NavButtonData("AI Chat (Utama)", Icons.AutoMirrored.Filled.Chat, NexoraCyan, "chat", "Chat on-device tanpa API key"),
+                NavButtonData("Neural Training", Icons.Default.ModelTraining, NexoraEmerald, "training", "Backpropagation on-device & loss"),
+                NavButtonData("Impor PyTorch (.pt)", Icons.Default.FileOpen, NexoraViolet, "pytorch", "Ekstrak tensor & lanjut latih"),
+                NavButtonData("Dataset (Prompt-Reply)", Icons.Default.Storage, NexoraAmber, "dataset", "${trainingData.size} pasangan prompt–reply"),
+                NavButtonData("Model Manager", Icons.Default.Memory, NexoraCyan, "models", "Inspeksi biner GGUF & hardware"),
+                NavButtonData("Pengaturan", Icons.Default.Settings, TextSecondary, "settings", "Konfigurasi on-device & CPU")
             )
 
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {

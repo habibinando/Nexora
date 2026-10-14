@@ -129,6 +129,7 @@ fun NexoraHeader(
     activeModelName: String,
     isOffline: Boolean,
     onBack: (() -> Unit)? = null,
+    onMenuClick: (() -> Unit)? = null,
     actions: @Composable RowScope.() -> Unit = {}
 ) {
     TopAppBar(
@@ -162,7 +163,18 @@ fun NexoraHeader(
             }
         },
         navigationIcon = {
-            if (onBack != null) {
+            if (onMenuClick != null) {
+                IconButton(
+                    onClick = onMenuClick,
+                    modifier = Modifier.testTag("nav_drawer_menu_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Menu,
+                        contentDescription = "Menu Navigasi",
+                        tint = TextPrimary
+                    )
+                }
+            } else if (onBack != null) {
                 IconButton(
                     onClick = onBack,
                     modifier = Modifier.testTag("nav_back_button")

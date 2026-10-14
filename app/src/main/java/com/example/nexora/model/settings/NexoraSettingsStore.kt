@@ -15,9 +15,9 @@ class NexoraSettingsStore private constructor(context: Context) {
         if (k.isNotBlank() && k != "MY_GEMINI_API_KEY") k else ""
     } catch (_: Exception) { "" }
 
-    // 1. Strict Local-First (default: false when build API key is available for ChatGPT-like hybrid AI chat)
+    // 1. Strict Local-First (default: true, operates 100% on-device with zero API key)
     private val _offlineEnforced = MutableStateFlow(
-        prefs.getBoolean(KEY_OFFLINE_ENFORCED, buildApiKey.isBlank())
+        prefs.getBoolean(KEY_OFFLINE_ENFORCED, true)
     )
     val offlineEnforced: StateFlow<Boolean> = _offlineEnforced.asStateFlow()
 

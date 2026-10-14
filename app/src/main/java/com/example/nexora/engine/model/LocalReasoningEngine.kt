@@ -197,22 +197,22 @@ object LocalReasoningEngine {
         } else ""
 
         return buildString {
-            appendLine("ℹ️ **Status: Mode 100% On-Device (Offline)**")
+            appendLine("ℹ️ **Status: AI Berjalan 100% On-Device (Bebas Cloud & Tanpa API Key)**")
             appendLine()
             if (memoryNote.isNotBlank()) append(memoryNote)
-            appendLine("Saat ini Nexora beroperasi secara lokal di perangkat tanpa koneksi ke cloud.")
+            appendLine("Aplikasi beroperasi secara mandiri di prosesor HP Anda tanpa memerlukan API key eksternal.")
             appendLine()
-            appendLine("• **Untuk Kemampuan Chat Cerdas (Layaknya ChatGPT)**:")
-            appendLine("  Masukkan Gemini API Key di menu **Pengaturan** (atau konfigurasikan di Secrets panel). Model Gemini 3.5 Flash akan langsung aktif dengan streaming penalaran orisinal.")
+            appendLine("• **Pelatihan Jaringan Saraf Mandiri (On-Device)**:")
+            appendLine("  Buka menu samping (☰) → **Training & Arsitektur** untuk melatih model lokal dengan Backpropagation asli & optimizer AdamW. Bobot tersimpan permanen di penyimpanan internal.")
             appendLine()
-            appendLine("• **Untuk Inferensi Bobot Neural Mandiri (100% On-Device)**:")
-            appendLine("  Buka tab **Training** untuk melatih jaringan saraf tiruan (Char-RNN) dengan Backpropagation & optimizer AdamW. Setelah dilatih, Anda dapat mengaktifkan inferensi bobot terlatih langsung di chat.")
+            appendLine("• **Impor Model PyTorch (.pt)**:")
+            appendLine("  Buka menu samping (☰) → **Impor PyTorch (.pt)** untuk membedah berkas checkpoint `.pt`/`.pth`/`.json`, menghitung parameter nyata, dan melanjutkan pelatihan di perangkat.")
             appendLine()
-            appendLine("• **Fitur Lokal yang Siap Digunakan Langsung**:")
+            appendLine("• **Perkakas Lokal yang Siap Digunakan Langsung**:")
             appendLine("  - Kalkulasi matematika presisi (contoh: `hitung: 125 * 48` atau `sqrt(625)`)")
-            appendLine("  - Eksekusi kode Python lokal (contoh: `python: print([x**2 for x in range(5)])`)")
-            appendLine("  - Pencatatan memori SQLite (contoh: `simpan memori: <judul>, <isi>` atau `cari memori: <kata kunci>`)")
-            appendLine("  - Ekstraksi teks & OCR berkas (tekan tombol **+** di samping kolom input)")
+            appendLine("  - Eksekusi kode skrip Python lokal (contoh: `python: print([x**2 for x in range(5)])`)")
+            appendLine("  - Basis data memori SQLite Room (contoh: `simpan memori: <judul>, <isi>` atau `cari memori: <kata kunci>`)")
+            appendLine("  - OCR pembaca teks foto & dokumen (ikon **+** di samping kolom input)")
         }
     }
 }

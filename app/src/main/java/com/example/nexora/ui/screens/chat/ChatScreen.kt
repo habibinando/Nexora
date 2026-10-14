@@ -61,10 +61,14 @@ fun ChatScreen(
     onBack: () -> Unit,
     onNavigateToExperiments: () -> Unit,
     onNavigateToSettings: (() -> Unit)? = null,
+    onNavigateToPyTorch: (() -> Unit)? = null,
+    onNavigateToDataset: (() -> Unit)? = null,
+    onOpenMenu: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     BackHandler { onBack() }
     val context = LocalContext.current
+    var showOptionsMenu by remember { mutableStateOf(false) }
 
     val messages by viewModel.chatMessages.collectAsStateWithLifecycle()
     val streamingState by viewModel.streamingState.collectAsStateWithLifecycle()
@@ -152,12 +156,13 @@ fun ChatScreen(
             .background(DarkBackground)
             .imePadding()
     ) {
-        // Top Header
+        // Top Header with Drawer Hamburger (baris 3) & 3-dots Overflow Menu
         NexoraHeader(
             title = "Nexora Chat",
             activeModelName = activeModel.name,
             isOffline = isOffline,
-            onBack = onBack,
+            onBack = if (onOpenMenu != null) null else onBack,
+            onMenuClick = onOpenMenu,
             actions = {
                 IconButton(
                     onClick = { viewModel.clearChat() },
@@ -168,6 +173,67 @@ fun ChatScreen(
                         contentDescription = "Hapus Riwayat Chat",
                         tint = TextSecondary
                     )
+                }
+
+                Box {
+                    IconButton(
+                        onClick = { showOptionsMenu = true },
+                        modifier = Modifier.testTag("chat_overflow_options_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "Menu Opsi Lainnya",
+                            tint = TextPrimary
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = showOptionsMenu,
+                        onDismissRequest = { showOptionsMenu = false },
+                        modifier = Modifier.background(DarkSurface)
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Latih Jaringan Saraf (Training)", color = TextPrimary, fontSize = 13.sp) },
+                            leadingIcon = { Icon(Icons.Default.ModelTraining, contentDescription = null, tint = NexoraCyan) },
+                            onClick = {
+                                showOptionsMenu = false
+                                onNavigateToExperiments()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Impor Model PyTorch (.pt)", color = TextPrimary, fontSize = 13.sp) },
+                            leadingIcon = { Icon(Icons.Default.FileOpen, contentDescription = null, tint = NexoraViolet) },
+                            onClick = {
+                                showOptionsMenu = false
+                                onNavigateToPyTorch?.invoke()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Dataset (Prompt → Reply)", color = TextPrimary, fontSize = 13.sp) },
+                            leadingIcon = { Icon(Icons.Default.Storage, contentDescription = null, tint = NexoraEmerald) },
+                            onClick = {
+                                showOptionsMenu = false
+                                onNavigateToDataset?.invoke()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Pengaturan On-Device", color = TextPrimary, fontSize = 13.sp) },
+                            leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null, tint = TextSecondary) },
+                            onClick = {
+                                showOptionsMenu = false
+                                onNavigateToSettings?.invoke()
+                            }
+                        )
+                        HorizontalDivider(color = DarkOutline.copy(alpha = 0.5f))
+                        DropdownMenuItem(
+                            text = { Text("Bersihkan Chat", color = NexoraRose, fontSize = 13.sp) },
+                            leadingIcon = { Icon(Icons.Default.DeleteSweep, contentDescription = null, tint = NexoraRose) },
+                            onClick = {
+                                showOptionsMenu = false
+                                viewModel.clearChat()
+                            }
+                        )
+                    }
                 }
             }
         )

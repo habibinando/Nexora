@@ -12,7 +12,10 @@ import com.example.nexora.engine.model.ModelInfo
 import com.example.nexora.engine.model.ModelManager
 import com.example.nexora.engine.neural.LocalNeuralTrainer
 import com.example.nexora.engine.neural.LocalTrainingProgress
+import android.net.Uri
 import com.example.nexora.engine.neural.OptimizerType
+import com.example.nexora.engine.neural.PyTorchImportResult
+import com.example.nexora.engine.neural.PyTorchModelImporter
 import com.example.nexora.engine.neural.TrainingRamProfile
 import com.example.nexora.engine.strategy.StrategyEngine
 import com.example.nexora.engine.tool.NexoraTool
@@ -175,6 +178,94 @@ class NexoraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setPeftConfig(config: PeftLoraConfig) {
         _peftConfig.value = config
+    }
+
+    // PyTorch Checkpoint (.pt / .pth / .pte / .json) Importer State
+    private val _pyTorchImportResult = MutableStateFlow<PyTorchImportResult?>(null)
+    val pyTorchImportResult: StateFlow<PyTorchImportResult?> = _pyTorchImportResult.asStateFlow()
+
+    private val _isImportingPyTorch = MutableStateFlow(false)
+    val isImportingPyTorch: StateFlow<Boolean> = _isImportingPyTorch.asStateFlow()
+
+    fun clearPyTorchImportResult() {
+        _pyTorchImportResult.value = null
+    }
+
+    fun importPyTorchFile(uri: Uri, onComplete: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            _isImportingPyTorch.value = true
+            try {
+                val app = getApplication<Application>()
+                val fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "model_checkpoint.pt"
+                val fileSizeBytes = try {
+                    app.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
+                } catch (_: Exception) { 0L }
+
+                val result = withContext(Dispatchers.IO) {
+                    app.contentResolver.openInputStream(uri)?.use { stream ->
+                        PyTorchModelImporter.parseFromStream(stream, fileName, fileSizeBytes)
+                    } ?: PyTorchImportResult(
+                        isSuccess = false,
+                        fileName = fileName,
+                        fileSizeBytes = fileSizeBytes,
+                        tensorCount = 0,
+                        layerShapes = emptyMap(),
+                        totalParameters = 0L,
+                        frobeniusNorm = 0f,
+                        detectedArchitecture = "Gagal Buka Berkas",
+                        isReadyToContinueTraining = false,
+                        summary = "Tidak dapat membuka input stream dari URI berkas."
+                    )
+                }
+
+                _pyTorchImportResult.value = result
+                onComplete(result.isSuccess, result.summary)
+            } catch (e: Exception) {
+                onComplete(false, "Gagal mengimpor berkas PyTorch: ${e.message}")
+            } finally {
+                _isImportingPyTorch.value = false
+            }
+        }
+    }
+
+    fun applyImportedPyTorchWeights(onComplete: (Boolean, String) -> Unit) {
+        val result = _pyTorchImportResult.value
+        if (result == null || !result.isSuccess) {
+            onComplete(false, "Belum ada hasil impor PyTorch yang siap diterapkan.")
+            return
+        }
+
+        viewModelScope.launch {
+            val applied = withContext(Dispatchers.Default) {
+                localNeuralTrainer.applyImportedWeights(result)
+            }
+            if (applied) {
+                settingsStore.setUseTrainedWeights(true)
+                onComplete(true, "Bobot PyTorch (${result.totalParameters} parameter) berhasil diterapkan ke model on-device! Anda dapat langsung lanjut training.")
+            } else {
+                onComplete(false, "Gagal memetakan tensor bobot ke model on-device.")
+            }
+        }
+    }
+
+    fun addTrainingPair(prompt: String, reply: String, onComplete: (Boolean) -> Unit) {
+        if (prompt.isBlank() || reply.isBlank()) {
+            onComplete(false)
+            return
+        }
+        viewModelScope.launch {
+            dao.insertTrainingData(
+                TrainingDataEntity(
+                    prompt = prompt.trim(),
+                    completion = reply.trim(),
+                    category = "PROMPT_REPLY_PAIR",
+                    score = 100,
+                    isIncludedInDataset = true,
+                    datasetName = "Pasangan-Latih-Lokal"
+                )
+            )
+            onComplete(true)
+        }
     }
 
     fun fetchHuggingFaceDataset(datasetId: String, split: String = "train", limit: Int = 15) {

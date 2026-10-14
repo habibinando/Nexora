@@ -293,6 +293,38 @@ class LocalNeuralTrainer(
     }
 
     /**
+     * Menerapkan bobot PyTorch yang diimpor ke model CharRNN lokal dan menyimpannya ke disk
+     * sehingga pengguna dapat langsung melanjutkan pelatihan (continue training) di perangkat.
+     */
+    fun applyImportedWeights(importResult: PyTorchImportResult): Boolean {
+        return try {
+            val success = PyTorchModelImporter.applyToCharRnnModel(_model, importResult)
+            if (success) {
+                _model.saveToFile(weightsFile)
+                val (memUsed, memMax) = getRealJvmMemory()
+                val prof = TrainingRamProfile.findProfileByDimensions(_model.embedDim, _model.hiddenDim)
+                _progress.update {
+                    it.copy(
+                        vocabSize = _model.vocabSize,
+                        hiddenDim = _model.hiddenDim,
+                        embedDim = _model.embedDim,
+                        totalParameters = _model.countParameters(),
+                        ramProfileName = prof?.name ?: "PyTorch Import (${_model.hiddenDim}h)",
+                        memoryUsedMb = memUsed,
+                        memoryMaxMb = memMax,
+                        isWeightsSaved = true,
+                        statusMessage = "Bobot PyTorch (${importResult.fileName}) berhasil diterapkan ke model on-device"
+                    )
+                }
+            }
+            success
+        } catch (e: Exception) {
+            Log.e("LocalNeuralTrainer", "Gagal menerapkan bobot PyTorch: ${e.message}", e)
+            false
+        }
+    }
+
+    /**
      * Run training loop in background without blocking UI.
      * Uses practical defaults (epochs = 25, learningRate = 0.05f) to ensure real neural loss reduction.
      * Evaluates true Validation Loss with pure forward pass (evaluateStep) and tracks real JVM RAM.
