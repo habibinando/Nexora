@@ -1,6 +1,7 @@
 package com.example.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -668,7 +669,7 @@ fun NeuralTrainingScreen(
                     .height(48.dp)
                     .testTag("save_checkpoint_button"),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = ElectricCyan),
-                border = ButtonDefaults.outlinedButtonBorder.copy(brush = Brush.horizontalGradient(listOf(ElectricCyan, NeonPurple)))
+                border = BorderStroke(1.dp, Brush.horizontalGradient(listOf(ElectricCyan, NeonPurple)))
             ) {
                 Icon(Icons.Default.Save, contentDescription = "Simpan Adapter", modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(6.dp))

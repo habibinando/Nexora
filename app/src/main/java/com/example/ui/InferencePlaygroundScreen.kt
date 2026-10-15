@@ -17,8 +17,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.CompareArrows
 import androidx.compose.material.icons.filled.Bolt
-import androidx.compose.material.icons.filled.CompareArrows
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -279,7 +279,7 @@ fun InferencePlaygroundScreen(
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.CompareArrows, contentDescription = "Perbandingan", tint = NeonPurple, modifier = Modifier.size(20.dp))
+                    Icon(Icons.AutoMirrored.Filled.CompareArrows, contentDescription = "Perbandingan", tint = NeonPurple, modifier = Modifier.size(20.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Dinamika Pelatihan Bobot", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                 }
