@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/ic_nexora_icon_1791081343975"
+        android:drawable="@drawable/neural_ai_icon_1792104262720"
         android:gravity="center" />
 </layer-list>

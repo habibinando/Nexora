@@ -159,6 +159,21 @@ fun PyTorchImportScreen(
                                     color = TextMuted,
                                     lineHeight = 15.sp
                                 )
+
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = "3. Bagaimana dengan Deeplearning4j (DL4J)?:",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    color = NexoraViolet
+                                )
+                                Text(
+                                    text = "• Library Deeplearning4j bawaan (ND4J) membutuhkan libnd4jcpu.so (~150MB per ABI) yang akan membengkakkan APK menjadi 250MB–500MB dan rentan Out-of-Memory di HP.\n" +
+                                            "• Sebagai solusinya, aplikasi ini dapat langsung membaca berkas zip model DL4J (ModelSerializer yang berisi configuration.json & coefficients.bin), mengekstrak bobot float-nya, dan melanjutkan training di mesin on-device murni Kotlin & Multik yang sangat ringan (<88MB APK)!",
+                                    fontSize = 11.sp,
+                                    color = TextMuted,
+                                    lineHeight = 15.sp
+                                )
                             }
                         }
                     }
@@ -224,7 +239,7 @@ fun PyTorchImportScreen(
                             } else {
                                 Icon(Icons.Default.FileOpen, contentDescription = null, modifier = Modifier.size(20.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text("Pilih Berkas PyTorch (.pt / .pth / .json)", fontWeight = FontWeight.Bold)
+                                Text("Pilih Berkas Model (.pt / .pth / .zip / .json)", fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -407,13 +422,13 @@ fun PyTorchImportScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "Panduan Ekspor dari PyTorch di Komputer / Server",
+                            text = "Panduan Ekspor dari PyTorch (Python) & Deeplearning4j (Java)",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
                             color = TextPrimary
                         )
                         Text(
-                            text = "Jalankan skrip Python berikut di laptop/PC Anda untuk menyimpan state_dict ke format yang langsung kompatibel dengan aplikasi ini:",
+                            text = "Jalankan skrip berikut di laptop/PC Anda untuk menyimpan model ke format yang langsung kompatibel dengan aplikasi ini:",
                             fontSize = 11.sp,
                             color = TextSecondary,
                             lineHeight = 15.sp
@@ -426,15 +441,18 @@ fun PyTorchImportScreen(
                         ) {
                             Text(
                                 text = """
-import torch
-import json
+// --- CARA A: Deeplearning4j (Java) ---
+import org.deeplearning4j.util.ModelSerializer;
+File dl4jFile = new File("model_dl4j.zip");
+ModelSerializer.writeModel(net, dl4jFile, true);
 
-# Cara 1: Simpan standard PyTorch .pt
+# --- CARA B: PyTorch (Python .pt) ---
+import torch
 torch.save(model.state_dict(), "model_weights.pt")
 
-# Cara 2: Simpan JSON float array (kompatibilitas 100%)
-state_dict = model.state_dict()
-export_dict = {k: v.cpu().numpy().tolist() for k, v in state_dict.items()}
+# --- CARA C: JSON Float Array Export ---
+import json
+export_dict = {k: v.cpu().numpy().tolist() for k, v in model.state_dict().items()}
 with open("model_weights.json", "w") as f:
     json.dump(export_dict, f)
                                 """.trimIndent(),

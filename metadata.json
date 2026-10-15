@@ -1,6 +1,6 @@
 {
-  "name": "Nexora",
-  "description": "Local-first modular AI system that continuously improves through experience, memory, experimentation, and strategy synthesis.",
+  "name": "NeuralAI",
+  "description": "On-Device Neural Network Training & Acceleration Lab with Native NDK Support",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -2,20 +2,23 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val NexoraCyan = Color(0xFF00D2FF)
-val NexoraCyanDark = Color(0xFF004D63)
-val NexoraViolet = Color(0xFF818CF8)
-val NexoraVioletDark = Color(0xFF312E81)
-val NexoraEmerald = Color(0xFF10B981)
-val NexoraAmber = Color(0xFFF59E0B)
-val NexoraRose = Color(0xFFF43F5E)
+// Futuristic Neural Dark Theme Palette
+val CyberBackground = Color(0xFF090D16)
+val CyberSurface = Color(0xFF111827)
+val CyberSurfaceVariant = Color(0xFF1E293B)
+val CyberSurfaceCard = Color(0xFF161F30)
 
-val DarkBackground = Color(0xFF090D16)
-val DarkSurface = Color(0xFF0F172A)
-val DarkSurfaceVariant = Color(0xFF1E293B)
-val DarkSurfaceHighlight = Color(0xFF283548)
-val DarkOutline = Color(0xFF334155)
+val ElectricCyan = Color(0xFF00E5FF)
+val ElectricCyanDark = Color(0xFF00B0FF)
+val NeonPurple = Color(0xFFA855F7)
+val DeepViolet = Color(0xFF7C3AED)
+val NeuralGreen = Color(0xFF10B981)
+val AccentOrange = Color(0xFFF97316)
+val DangerRed = Color(0xFFEF4444)
 
 val TextPrimary = Color(0xFFF8FAFC)
 val TextSecondary = Color(0xFF94A3B8)
-val TextMuted = Color(0xFF64748B)
+val TextTertiary = Color(0xFF64748B)
+
+val BorderSubtle = Color(0xFF334155)
+val GlowBorder = Color(0x3300E5FF)

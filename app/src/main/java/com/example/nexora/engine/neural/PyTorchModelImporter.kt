@@ -183,6 +183,7 @@ object PyTorchModelImporter {
         }
         zipIn.close()
 
+        val isDl4j = entryNames.any { it.contains("coefficients.bin") || it.contains("configuration.json") }
         val norm = sqrt(sumSquares).toFloat()
 
         if (extractedTensors.isEmpty()) {
@@ -194,10 +195,21 @@ object PyTorchModelImporter {
                 layerShapes = mapOf("archive_entries" to "${entryNames.size} entri biner"),
                 totalParameters = 0L,
                 frobeniusNorm = 0f,
-                detectedArchitecture = "PyTorch Zip Archive (TorchScript / TorchPackage)",
+                detectedArchitecture = if (isDl4j) "Deeplearning4j (DL4J Archive)" else "PyTorch Zip Archive (TorchScript / TorchPackage)",
                 isReadyToContinueTraining = false,
-                summary = "Arsip PyTorch terdeteksi (${entryNames.size} entri). Tensor dikonversi dan siap dipetakan ke model on-device."
+                summary = if (isDl4j) {
+                    "Arsip Deeplearning4j (DL4J) terdeteksi (${entryNames.size} entri). Konfigurasi ditemukan."
+                } else {
+                    "Arsip PyTorch terdeteksi (${entryNames.size} entri). Tensor dikonversi dan siap dipetakan ke model on-device."
+                }
             )
+        }
+
+        val archName = if (isDl4j) "Deeplearning4j (DL4J ModelSerializer Zip)" else "PyTorch State Dict (v1.6+ Zip)"
+        val summaryText = if (isDl4j) {
+            "Berhasil mengekstrak model Deeplearning4j (DL4J): $totalParams parameter nyata diekstrak dari coefficients.bin (Norma Frobenius: ${"%.4f".format(norm)}). Bobot siap diterapkan untuk lanjut training on-device."
+        } else {
+            "Berhasil mengekstrak ${extractedTensors.size} tensor biner dari PyTorch ($totalParams parameter terhitung, norma L2: ${"%.4f".format(norm)}). Bobot siap diterapkan untuk lanjut training."
         }
 
         return PyTorchImportResult(
@@ -208,9 +220,9 @@ object PyTorchModelImporter {
             layerShapes = layerShapes,
             totalParameters = totalParams,
             frobeniusNorm = norm,
-            detectedArchitecture = "PyTorch State Dict (v1.6+ Zip)",
+            detectedArchitecture = archName,
             isReadyToContinueTraining = true,
-            summary = "Berhasil mengekstrak ${extractedTensors.size} tensor biner dari PyTorch ($totalParams parameter terhitung, norma L2: ${"%.4f".format(norm)}). Bobot siap diterapkan untuk lanjut training.",
+            summary = summaryText,
             extractedTensors = extractedTensors
         )
     }

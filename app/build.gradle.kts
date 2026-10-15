@@ -13,13 +13,33 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.nexora.ai"
+    applicationId = "com.aistudio.neuralai.vkzqmr"
     minSdk = 24
     targetSdk = 36
-    versionCode = 5
-    versionName = "4.1"
+    versionCode = 1
+    versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    ndk {
+      abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
+    }
+
+    externalNativeBuild {
+      cmake {
+        cppFlags += listOf("-std=c++20", "-O3", "-ffast-math", "-funroll-loops")
+        arguments += listOf("-DANDROID_STL=c++_shared")
+      }
+    }
+  }
+
+  ndkVersion = "27.2.12479018"
+
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
+    }
   }
 
   signingConfigs {
@@ -94,7 +114,7 @@ dependencies {
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
-  implementation(libs.androidx.navigation.compose)
+  // implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   // implementation(libs.coil.compose)
@@ -118,10 +138,6 @@ dependencies {
   implementation(libs.okhttp)
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
-  implementation(libs.mlkit.text.recognition)
-  implementation(libs.multik.core)
-  implementation(libs.multik.kotlin)
-  implementation(libs.executorch.android)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
