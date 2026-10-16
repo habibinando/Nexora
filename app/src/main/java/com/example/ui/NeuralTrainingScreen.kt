@@ -47,11 +47,13 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -101,13 +103,18 @@ fun NeuralTrainingScreen(
     val context = LocalContext.current
     val telemetry by trainer.telemetry.collectAsState()
 
-    // Dataset sample presets
-    val presetA = "Kecerdasan buatan on-device membuka privasi penuh bagi pengguna tanpa ketergantungan server cloud eksternal. Neural AI mengoptimalkan komputasi tensor secara langsung pada memori perangkat lokal dengan presisi tinggi dan efisiensi termal terbaik."
-    val presetB = "def neural_forward(inputs, weights, bias):\n    # On-device SIMD matrix multiplication\n    activations = [tanh(sum(w * x for w, x in zip(weights, inputs)) + bias)]\n    return activations"
-    val presetC = "To be, or not to be, that is the question: Whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune, or to take arms against a sea of troubles."
+    // Dataset from DatasetRepository
+    val activeDatasetInfo by com.example.neural.DatasetRepository.activeDataset.collectAsState()
+    var datasetText by remember { mutableStateOf(activeDatasetInfo.text) }
 
+    val presetA = com.example.neural.DatasetRepository.INDONESIAN_CONVERSATIONAL
+    val presetB = com.example.neural.DatasetRepository.TECH_AI_KNOWLEDGE
+    val presetC = com.example.neural.DatasetRepository.KOTLIN_CODE_CORPUS
     var selectedPresetIndex by remember { mutableIntStateOf(0) }
-    var datasetText by remember { mutableStateOf(presetA) }
+
+    LaunchedEffect(activeDatasetInfo) {
+        datasetText = activeDatasetInfo.text
+    }
 
     var hiddenDimension by remember { mutableIntStateOf(64) }
     var sequenceLength by remember { mutableIntStateOf(32) }
@@ -684,9 +691,9 @@ fun NeuralTrainingScreen(
                     .testTag("nav_to_inference_button"),
                 colors = ButtonDefaults.buttonColors(containerColor = NeonPurple, contentColor = Color.White)
             ) {
-                Icon(Icons.Default.Bolt, contentDescription = "Uji Playground", modifier = Modifier.size(18.dp))
+                Icon(Icons.Default.Psychology, contentDescription = "Chat Nexora", modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("Uji Playground")
+                Text("Chat Nexora")
             }
         }
 

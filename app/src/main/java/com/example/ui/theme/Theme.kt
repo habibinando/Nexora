@@ -29,7 +29,7 @@ private val NeuralDarkColorScheme = darkColorScheme(
 )
 
 @Composable
-fun NeuralAITheme(
+fun NexoraTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit
 ) {
@@ -39,3 +39,10 @@ fun NeuralAITheme(
         content = content
     )
 }
+
+// Backward compatibility alias
+@Composable
+fun NeuralAITheme(
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    content: @Composable () -> Unit
+) = NexoraTheme(darkTheme, content)

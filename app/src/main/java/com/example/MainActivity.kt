@@ -14,10 +14,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.Architecture
 import androidx.compose.material.icons.filled.Bolt
-import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Dataset
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -36,7 +36,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -44,18 +43,18 @@ import androidx.compose.ui.unit.sp
 import com.example.neural.HardwareBenchmarkEngine
 import com.example.neural.LocalNeuralTrainer
 import com.example.neural.NdkNeuralAccelerator
-import com.example.ui.ArchitectureExplainerScreen
-import com.example.ui.CheckpointManagerScreen
+import com.example.ui.ChatScreen
+import com.example.ui.DatasetManagerScreen
 import com.example.ui.HardwareBenchmarkScreen
-import com.example.ui.InferencePlaygroundScreen
+import com.example.ui.ModelStudioScreen
 import com.example.ui.NeuralTrainingScreen
 import com.example.ui.theme.CyberBackground
 import com.example.ui.theme.CyberSurface
 import com.example.ui.theme.CyberSurfaceCard
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.NeonPurple
-import com.example.ui.theme.NeuralAITheme
 import com.example.ui.theme.NeuralGreen
+import com.example.ui.theme.NexoraTheme
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.TextTertiary
@@ -65,7 +64,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            NeuralAITheme {
+            NexoraTheme {
                 MainApp()
             }
         }
@@ -100,15 +99,15 @@ fun MainApp() {
                             modifier = Modifier.align(Alignment.CenterStart)
                         ) {
                             Text(
-                                text = "NeuralAI",
+                                text = "Nexora",
                                 fontWeight = FontWeight.ExtraBold,
                                 color = ElectricCyan,
-                                fontSize = 18.sp
+                                fontSize = 19.sp
                             )
                             Text(
-                                text = " • Lab On-Device",
+                                text = " • Studio On-Device",
                                 color = TextSecondary,
-                                fontSize = 14.sp
+                                fontSize = 13.sp
                             )
                         }
 
@@ -154,8 +153,8 @@ fun MainApp() {
                 NavigationBarItem(
                     selected = selectedTabIndex == 1,
                     onClick = { selectedTabIndex = 1 },
-                    icon = { Icon(Icons.Default.Psychology, contentDescription = "Playground") },
-                    label = { Text("Playground", fontSize = 11.sp) },
+                    icon = { Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = "Chat") },
+                    label = { Text("Chat", fontSize = 11.sp) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = NeonPurple,
                         selectedTextColor = NeonPurple,
@@ -163,14 +162,14 @@ fun MainApp() {
                         unselectedTextColor = TextTertiary,
                         indicatorColor = CyberSurface
                     ),
-                    modifier = Modifier.testTag("nav_tab_playground")
+                    modifier = Modifier.testTag("nav_tab_chat")
                 )
 
                 NavigationBarItem(
                     selected = selectedTabIndex == 2,
                     onClick = { selectedTabIndex = 2 },
-                    icon = { Icon(Icons.Default.FolderOpen, contentDescription = "Adapter") },
-                    label = { Text("Adapter", fontSize = 11.sp) },
+                    icon = { Icon(Icons.Default.Dataset, contentDescription = "Dataset") },
+                    label = { Text("Dataset", fontSize = 11.sp) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = NeuralGreen,
                         selectedTextColor = NeuralGreen,
@@ -178,14 +177,14 @@ fun MainApp() {
                         unselectedTextColor = TextTertiary,
                         indicatorColor = CyberSurface
                     ),
-                    modifier = Modifier.testTag("nav_tab_adapter")
+                    modifier = Modifier.testTag("nav_tab_dataset")
                 )
 
                 NavigationBarItem(
                     selected = selectedTabIndex == 3,
                     onClick = { selectedTabIndex = 3 },
-                    icon = { Icon(Icons.Default.Speed, contentDescription = "Benchmark") },
-                    label = { Text("Benchmark", fontSize = 11.sp) },
+                    icon = { Icon(Icons.Default.Architecture, contentDescription = "Studio") },
+                    label = { Text("Studio", fontSize = 11.sp) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = ElectricCyan,
                         selectedTextColor = ElectricCyan,
@@ -193,14 +192,14 @@ fun MainApp() {
                         unselectedTextColor = TextTertiary,
                         indicatorColor = CyberSurface
                     ),
-                    modifier = Modifier.testTag("nav_tab_benchmark")
+                    modifier = Modifier.testTag("nav_tab_studio")
                 )
 
                 NavigationBarItem(
                     selected = selectedTabIndex == 4,
                     onClick = { selectedTabIndex = 4 },
-                    icon = { Icon(Icons.Default.Info, contentDescription = "Edukasi & CI") },
-                    label = { Text("Edukasi", fontSize = 11.sp) },
+                    icon = { Icon(Icons.Default.Speed, contentDescription = "Benchmark") },
+                    label = { Text("Benchmark", fontSize = 11.sp) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = TextPrimary,
                         selectedTextColor = TextPrimary,
@@ -208,7 +207,7 @@ fun MainApp() {
                         unselectedTextColor = TextTertiary,
                         indicatorColor = CyberSurface
                     ),
-                    modifier = Modifier.testTag("nav_tab_education")
+                    modifier = Modifier.testTag("nav_tab_benchmark")
                 )
             }
         }
@@ -230,16 +229,21 @@ fun MainApp() {
                         trainer = trainer,
                         onNavigateToInference = { selectedTabIndex = 1 }
                     )
-                    1 -> InferencePlaygroundScreen(
-                        trainer = trainer
+                    1 -> ChatScreen(
+                        trainer = trainer,
+                        onNavigateToTraining = { selectedTabIndex = 0 }
                     )
-                    2 -> CheckpointManagerScreen(
-                        trainer = trainer
+                    2 -> DatasetManagerScreen(
+                        trainer = trainer,
+                        onDatasetChanged = { /* synced */ }
                     )
-                    3 -> HardwareBenchmarkScreen(
+                    3 -> ModelStudioScreen(
+                        trainer = trainer,
+                        onNavigateToChat = { selectedTabIndex = 1 }
+                    )
+                    4 -> HardwareBenchmarkScreen(
                         benchmarkEngine = benchmarkEngine
                     )
-                    4 -> ArchitectureExplainerScreen()
                 }
             }
         }

@@ -4,12 +4,15 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.InputStream
+import java.io.OutputStream
+import java.security.MessageDigest
 import java.util.Random
 import kotlin.math.exp
 import kotlin.math.sqrt
 
 /**
- * Real On-Device Recurrent Neural Network (Char-RNN) Model.
+ * Real On-Device Recurrent Neural Network (Nexora Char-RNN) Model.
  * Computes real forward inference, real parameter counts, and real serialized sizes.
  */
 class CharRNNModel(
@@ -34,13 +37,13 @@ class CharRNNModel(
     init {
         val rand = Random(seed)
         // Xavier / Glorot initialization
-        val stdWxh = 1.0f / sqrt(vocabSize.toFloat())
+        val stdWxh = 1.0f / sqrt(vocabSize.coerceAtLeast(1).toFloat())
         for (i in wxh.indices) wxh[i] = (rand.nextGaussian() * stdWxh).toFloat()
 
-        val stdWhh = 1.0f / sqrt(hiddenSize.toFloat())
+        val stdWhh = 1.0f / sqrt(hiddenSize.coerceAtLeast(1).toFloat())
         for (i in whh.indices) whh[i] = (rand.nextGaussian() * stdWhh).toFloat()
 
-        val stdWhy = 1.0f / sqrt(hiddenSize.toFloat())
+        val stdWhy = 1.0f / sqrt(hiddenSize.coerceAtLeast(1).toFloat())
         for (i in why.indices) why[i] = (rand.nextGaussian() * stdWhy).toFloat()
     }
 
@@ -131,6 +134,24 @@ class CharRNNModel(
         return sb.toString()
     }
 
+    /**
+     * Computes real SHA-256 hash of all model weights to ensure verifiable checkpoint integrity.
+     */
+    fun computeChecksumSha256(): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        fun hashFloats(arr: FloatArray) {
+            val byteBuf = java.nio.ByteBuffer.allocate(arr.size * 4)
+            for (f in arr) byteBuf.putFloat(f)
+            digest.update(byteBuf.array())
+        }
+        hashFloats(wxh)
+        hashFloats(whh)
+        hashFloats(why)
+        hashFloats(bh)
+        hashFloats(by)
+        return digest.digest().joinToString("") { "%02x".format(it) }.take(12)
+    }
+
     private fun forwardOneStep(xIdx: Int, prevH: FloatArray): FloatArray {
         val nextH = FloatArray(hiddenSize)
         val clampedIdx = xIdx.coerceIn(0, vocabSize - 1)
@@ -150,8 +171,13 @@ class CharRNNModel(
      */
     fun serializeToBytes(): ByteArray {
         val baos = ByteArrayOutputStream()
-        val dos = DataOutputStream(baos)
-        dos.writeInt(MAGIC_HEADER)
+        serializeToStream(baos)
+        return baos.toByteArray()
+    }
+
+    fun serializeToStream(outputStream: OutputStream) {
+        val dos = DataOutputStream(outputStream)
+        dos.writeInt(MAGIC_HEADER_NEXORA)
         dos.writeInt(1) // version
         dos.writeInt(vocabSize)
         for (c in vocab) {
@@ -171,16 +197,22 @@ class CharRNNModel(
         writeFloats(by)
 
         dos.flush()
-        return baos.toByteArray()
     }
 
     companion object {
-        const val MAGIC_HEADER = 0x4E455552 // "NEUR"
+        const val MAGIC_HEADER_NEXORA = 0x4E45584F // "NEXO"
+        const val MAGIC_HEADER_LEGACY = 0x4E455552 // "NEUR"
 
         fun deserializeFromBytes(bytes: ByteArray): CharRNNModel {
-            val dis = DataInputStream(ByteArrayInputStream(bytes))
+            return deserializeFromStream(ByteArrayInputStream(bytes))
+        }
+
+        fun deserializeFromStream(inputStream: InputStream): CharRNNModel {
+            val dis = DataInputStream(inputStream)
             val magic = dis.readInt()
-            require(magic == MAGIC_HEADER) { "Invalid model checkpoint file" }
+            require(magic == MAGIC_HEADER_NEXORA || magic == MAGIC_HEADER_LEGACY) {
+                "Format file model tidak valid. Header tidak cocok."
+            }
             val version = dis.readInt()
             val vocabSize = dis.readInt()
             val vocabList = ArrayList<Char>(vocabSize)

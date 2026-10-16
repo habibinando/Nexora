@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "NeuralAI"
+rootProject.name = "Nexora"
 
 include(":app")

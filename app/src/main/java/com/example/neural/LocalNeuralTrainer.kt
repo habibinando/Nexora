@@ -34,14 +34,51 @@ data class TrainingTelemetry(
     val gradientNorm: Float? = null,
     val isNdkAccelerated: Boolean = false,
     val totalParameters: Long? = null,
+    val hiddenSize: Int = 64,
+    val vocabSize: Int = 0,
     val statusMessage: String = "Siap memulai pelatihan on-device"
 )
+
+data class ChatMessage(
+    val id: String,
+    val sender: ChatSender,
+    val text: String,
+    val timestamp: Long = System.currentTimeMillis(),
+    val tokensGenerated: Int = 0,
+    val latencyMs: Long = 0,
+    val tokensPerSec: Float = 0f,
+    val isNdkUsed: Boolean = false
+)
+
+enum class ChatSender {
+    USER,
+    NEXORA,
+    SYSTEM
+}
 
 class LocalNeuralTrainer(
     private val scope: CoroutineScope
 ) {
     private val _telemetry = MutableStateFlow(TrainingTelemetry())
     val telemetry: StateFlow<TrainingTelemetry> = _telemetry.asStateFlow()
+
+    private val _chatMessages = MutableStateFlow<List<ChatMessage>>(
+        listOf(
+            ChatMessage(
+                id = "init_welcome",
+                sender = ChatSender.NEXORA,
+                text = "Halo! Saya Nexora, model AI saraf on-device Anda. Silakan latih bobot saya di tab Training, atau langsung ajukan pertanyaan untuk menguji respons generasi karakter secara real-time.",
+                tokensGenerated = 0,
+                latencyMs = 0,
+                tokensPerSec = 0f,
+                isNdkUsed = NdkNeuralAccelerator.isNdkAvailable
+            )
+        )
+    )
+    val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages.asStateFlow()
+
+    private val _isChatGenerating = MutableStateFlow(false)
+    val isChatGenerating: StateFlow<Boolean> = _isChatGenerating.asStateFlow()
 
     private var trainingJob: Job? = null
     var activeModel: CharRNNModel? = null
@@ -52,20 +89,50 @@ class LocalNeuralTrainer(
     private var learningRate: Float = 0.01f
     private var targetEpochs: Int = 5
 
-    fun initializeModel(datasetText: String, hiddenSize: Int = 64) {
-        val cleanText = datasetText.ifBlank { "NeuralAI on-device training engine" }
+    init {
+        // Automatically initialize model with default dataset
+        val defaultDataset = DatasetRepository.activeDataset.value
+        createCustomModel(hiddenSize = 64, datasetText = defaultDataset.text)
+    }
+
+    /**
+     * Builds and creates a custom model architecture with specified hidden size and dataset vocabulary.
+     */
+    fun createCustomModel(hiddenSize: Int = 64, datasetText: String = DatasetRepository.activeDataset.value.text, seed: Long = 42L): CharRNNModel {
+        val cleanText = datasetText.ifBlank { "Nexora On-Device Neural Intelligence" }
         trainingData = cleanText
         val uniqueChars = cleanText.toSet().toList().sorted()
-        val model = CharRNNModel(uniqueChars, hiddenSize)
+        val model = CharRNNModel(uniqueChars, hiddenSize.coerceIn(16, 512), seed)
         activeModel = model
         _telemetry.update {
             it.copy(
                 totalParameters = model.totalParameterCount,
-                statusMessage = "Model diinisialisasi (${model.totalParameterCount} parameter nyata)"
+                hiddenSize = model.hiddenSize,
+                vocabSize = model.vocabSize,
+                statusMessage = "Model kustom dibuat (${model.totalParameterCount} parameter nyata, ${model.vocabSize} vocab, hidden ${model.hiddenSize})"
+            )
+        }
+        return model
+    }
+
+    /**
+     * Loads an external or deserialized model into active memory.
+     */
+    fun loadModel(model: CharRNNModel, sourceLabel: String = "Model Checkpoint") {
+        activeModel = model
+        _telemetry.update {
+            it.copy(
+                totalParameters = model.totalParameterCount,
+                hiddenSize = model.hiddenSize,
+                vocabSize = model.vocabSize,
+                statusMessage = "$sourceLabel dimuat (${model.totalParameterCount} params)"
             )
         }
     }
 
+    /**
+     * Starts or continues training loop using real BPTT gradients and cross-entropy loss.
+     */
     fun startTraining(
         datasetText: String,
         hiddenSize: Int = 64,
@@ -75,8 +142,11 @@ class LocalNeuralTrainer(
     ) {
         if (trainingJob?.isActive == true) return
 
-        if (activeModel == null || activeModel?.vocab?.toSet() != datasetText.toSet()) {
-            initializeModel(datasetText, hiddenSize)
+        val text = datasetText.ifBlank { DatasetRepository.activeDataset.value.text }
+        trainingData = text
+
+        if (activeModel == null || activeModel?.vocab?.toSet() != text.toSet()) {
+            createCustomModel(hiddenSize, text)
         }
 
         val model = activeModel ?: return
@@ -84,7 +154,6 @@ class LocalNeuralTrainer(
         this.learningRate = lr.coerceIn(0.0001f, 0.5f)
         this.targetEpochs = epochs.coerceIn(1, 100)
 
-        val text = trainingData
         if (text.length <= seqLength) {
             _telemetry.update {
                 it.copy(statusMessage = "Dataset terlalu pendek untuk sequence length $seqLength")
@@ -199,7 +268,7 @@ class LocalNeuralTrainer(
                     val lossList = _telemetry.value.lossHistory.toMutableList()
 
                     for (epoch in (_telemetry.value.currentEpoch - 1).coerceAtLeast(0) until targetEpochs) {
-                        for (i in 0 until (text.length - seqLength - 1)) {
+                        for (i in (stepCount % stepsPerEpoch) until (text.length - seqLength - 1)) {
                             if (!isActive) break
 
                             val inputSlice = text.substring(i, i + seqLength)
@@ -247,6 +316,13 @@ class LocalNeuralTrainer(
                     _telemetry.update {
                         it.copy(statusMessage = "Pelatihan dijeda")
                     }
+                } catch (e: Exception) {
+                    _telemetry.update {
+                        it.copy(
+                            status = TrainingStatus.STOPPED,
+                            statusMessage = "Error: ${e.message}"
+                        )
+                    }
                 }
             }
         }
@@ -264,11 +340,99 @@ class LocalNeuralTrainer(
     }
 
     fun resetTraining() {
-        trainingJob?.cancel()
-        trainingJob = null
-        activeModel = null
-        _telemetry.value = TrainingTelemetry(
-            statusMessage = "Status reset. Siap memulai pelatihan baru."
+        stopTraining()
+        _telemetry.update {
+            TrainingTelemetry(
+                totalParameters = activeModel?.totalParameterCount,
+                hiddenSize = activeModel?.hiddenSize ?: 64,
+                vocabSize = activeModel?.vocabSize ?: 0,
+                statusMessage = "Pelatihan direset"
+            )
+        }
+    }
+
+    /**
+     * Sends a user chat message and triggers real on-device neural text generation.
+     */
+    fun sendChatMessage(userText: String, temperature: Float = 0.8f, maxTokens: Int = 100) {
+        val trimmed = userText.trim()
+        if (trimmed.isBlank() || _isChatGenerating.value) return
+
+        val userMsg = ChatMessage(
+            id = "user_${System.currentTimeMillis()}",
+            sender = ChatSender.USER,
+            text = trimmed
+        )
+        _chatMessages.update { it + userMsg }
+
+        _isChatGenerating.value = true
+
+        scope.launch(Dispatchers.Default) {
+            val startTime = System.currentTimeMillis()
+            val model = activeModel
+
+            if (model == null) {
+                _chatMessages.update {
+                    it + ChatMessage(
+                        id = "nexora_${System.currentTimeMillis()}",
+                        sender = ChatSender.NEXORA,
+                        text = "Model saraf belum dibuat. Silakan buka tab 'Model Studio' atau 'Training' terlebih dahulu untuk menginisialisasi arsitektur Nexora.",
+                        latencyMs = 0,
+                        tokensGenerated = 0,
+                        tokensPerSec = 0f,
+                        isNdkUsed = false
+                    )
+                }
+                _isChatGenerating.value = false
+                return@launch
+            }
+
+            // Real forward autoregressive inference from weights
+            val generatedFull = model.generate(
+                seedText = trimmed,
+                length = maxTokens.coerceIn(10, 300),
+                temperature = temperature
+            )
+
+            // Extract completion part
+            val completion = if (generatedFull.startsWith(trimmed)) {
+                generatedFull.substring(trimmed.length).trimStart()
+            } else {
+                generatedFull
+            }
+
+            val responseText = completion.ifBlank {
+                "..."
+            }
+
+            val endTime = System.currentTimeMillis()
+            val durationMs = (endTime - startTime).coerceAtLeast(1)
+            val tokensCount = responseText.length
+            val tokensPerSec = (tokensCount.toFloat() / (durationMs.toFloat() / 1000f)).coerceAtLeast(0f)
+
+            _chatMessages.update {
+                it + ChatMessage(
+                    id = "nexora_${System.currentTimeMillis()}",
+                    sender = ChatSender.NEXORA,
+                    text = responseText,
+                    tokensGenerated = tokensCount,
+                    latencyMs = durationMs,
+                    tokensPerSec = tokensPerSec,
+                    isNdkUsed = NdkNeuralAccelerator.isNdkAvailable
+                )
+            }
+
+            _isChatGenerating.value = false
+        }
+    }
+
+    fun clearChat() {
+        _chatMessages.value = listOf(
+            ChatMessage(
+                id = "cleared_${System.currentTimeMillis()}",
+                sender = ChatSender.SYSTEM,
+                text = "Riwayat percakapan telah dibersihkan."
+            )
         )
     }
 }
