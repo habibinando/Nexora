@@ -29,13 +29,13 @@ data class DatasetInfo(
 object DatasetRepository {
 
     /** Batas maksimum ukuran file impor (byte). Mencegah OutOfMemoryError. */
-    const val MAX_IMPORT_BYTES: Long = 5L * 1024 * 1024 // 5 MB
+    const val MAX_IMPORT_BYTES: Long = 15L * 1024 * 1024 // 5 MB
 
     /** Jumlah karakter yang ditampilkan sebagai pratinjau ketika dataset terlalu besar. */
-    const val PREVIEW_CHAR_LIMIT: Int = 4000
+    const val PREVIEW_CHAR_LIMIT: Int = 2000
 
     /** Di atas jumlah karakter ini, editor teks di UI dinonaktifkan (read-only preview). */
-    const val EDITOR_CHAR_LIMIT: Int = 16000
+    const val EDITOR_CHAR_LIMIT: Int = 8000
 
     val INDONESIAN_CONVERSATIONAL = """
 User: Halo Nexora, siapa kamu?
@@ -62,7 +62,7 @@ Nexora Neural Engine Architecture:
     val KOTLIN_CODE_CORPUS = """
 fun trainNexoraModel(dataset: String, hiddenSize: Int): Float {
     val model = NexoraModel(dataset.toSet().toList(), hiddenSize)
-    val metrics = model.step(dataset, learningRate = 0.01f)
+    val metrics = model.step(dataset, learningRate = 0.001f)
     return metrics.loss
 }
 class NexoraState(val epoch: Int, val loss: Float) {
