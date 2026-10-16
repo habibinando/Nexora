@@ -107,6 +107,18 @@ fun NeuralTrainingScreen(
     val activeDatasetInfo by com.example.neural.DatasetRepository.activeDataset.collectAsState()
     var datasetText by remember { mutableStateOf(activeDatasetInfo.text) }
 
+    // Cegah crash/ANR: dataset besar TIDAK dirender utuh di TextField.
+    // Editor hanya menampilkan pratinjau (read-only); datasetText penuh tetap dipakai saat startTraining.
+    val datasetTooLargeForEditor = datasetText.length > com.example.neural.DatasetRepository.EDITOR_CHAR_LIMIT
+    val datasetEditorText = remember(datasetText, datasetTooLargeForEditor) {
+        if (datasetTooLargeForEditor) {
+            datasetText.take(com.example.neural.DatasetRepository.PREVIEW_CHAR_LIMIT) +
+                "\n… [pratinjau saja — total ${datasetText.length} karakter, terlalu besar untuk diedit di layar]"
+        } else {
+            datasetText
+        }
+    }
+
     val presetA = com.example.neural.DatasetRepository.INDONESIAN_CONVERSATIONAL
     val presetB = com.example.neural.DatasetRepository.TECH_AI_KNOWLEDGE
     val presetC = com.example.neural.DatasetRepository.KOTLIN_CODE_CORPUS
@@ -309,12 +321,24 @@ fun NeuralTrainingScreen(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
+                if (datasetTooLargeForEditor) {
+                    Text(
+                        "Dataset berisi ${datasetText.length} karakter — terlalu besar untuk diedit di layar. Pratinjau ditampilkan di bawah; konten penuh tetap dipakai saat pelatihan.",
+                        color = NeuralGreen,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                }
                 OutlinedTextField(
-                    value = datasetText,
+                    value = datasetEditorText,
                     onValueChange = {
-                        datasetText = it
-                        selectedPresetIndex = -1
+                        if (!datasetTooLargeForEditor) {
+                            datasetText = it
+                            selectedPresetIndex = -1
+                        }
                     },
+                    readOnly = datasetTooLargeForEditor,
+                    enabled = !datasetTooLargeForEditor,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(110.dp)
@@ -324,9 +348,13 @@ fun NeuralTrainingScreen(
                         focusedBorderColor = ElectricCyan,
                         unfocusedBorderColor = BorderSubtle,
                         focusedContainerColor = CyberSurfaceVariant,
-                        unfocusedContainerColor = CyberSurfaceVariant
+                        unfocusedContainerColor = CyberSurfaceVariant,
+                        disabledContainerColor = CyberSurfaceVariant,
+                        disabledTextColor = TextSecondary,
+                        disabledBorderColor = BorderSubtle,
+                        disabledPlaceholderColor = TextTertiary
                     ),
-                    placeholder = { Text("Ketik atau tempel teks dataset...", color = TextTertiary) }
+                    placeholder = { Text(if (datasetTooLargeForEditor) "Pratinjau dataset (read-only)" else "Ketik atau tempel teks dataset...", color = TextTertiary) }
                 )
             }
         }
