@@ -124,6 +124,7 @@ fun NeuralTrainingScreen(
     var showSaveDialog by remember { mutableStateOf(false) }
     var checkpointNameInput by remember { mutableStateOf("") }
     var saveResultMessage by remember { mutableStateOf<String?>(null) }
+    var savedSessionSnapshot by remember { mutableStateOf(com.example.neural.SessionPersistenceManager.loadSession(context)) }
 
     val scrollState = rememberScrollState()
 
@@ -135,6 +136,58 @@ fun NeuralTrainingScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Saved Session Restore Banner
+        if (savedSessionSnapshot != null && telemetry.status == TrainingStatus.IDLE) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = CyberSurfaceCard),
+                border = CardDefaults.outlinedCardBorder()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, tint = ElectricCyan, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Sesi Pelatihan Tersimpan Ditemukan", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Snapshot sesi: Epoch ${savedSessionSnapshot?.currentEpoch}/${savedSessionSnapshot?.totalEpochs}, Step ${savedSessionSnapshot?.currentStep}/${savedSessionSnapshot?.totalSteps} (Loss: ${String.format(Locale.US, "%.3f", savedSessionSnapshot?.latestLoss ?: 0f)}).",
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                savedSessionSnapshot?.let { snapshot ->
+                                    trainer.restoreFromSnapshot(snapshot)
+                                    datasetText = snapshot.datasetText
+                                    hiddenDimension = trainer.activeModel?.hiddenSize ?: hiddenDimension
+                                    sequenceLength = snapshot.seqLength
+                                    learningRate = snapshot.learningRate
+                                    epochCount = snapshot.totalEpochs
+                                }
+                                savedSessionSnapshot = null
+                            },
+                            modifier = Modifier.height(36.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan, contentColor = Color.Black)
+                        ) {
+                            Text("Pulihkan Sesi", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                com.example.neural.SessionPersistenceManager.clearSession(context)
+                                savedSessionSnapshot = null
+                            },
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Text("Abaikan", fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+        }
+
         // NDK Accelerator Status Banner
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -414,7 +467,8 @@ fun NeuralTrainingScreen(
                                         hiddenSize = hiddenDimension,
                                         seqLen = sequenceLength,
                                         lr = learningRate,
-                                        epochs = epochCount
+                                        epochs = epochCount,
+                                        context = context
                                     )
                                 },
                                 modifier = Modifier
@@ -431,7 +485,7 @@ fun NeuralTrainingScreen(
 
                         TrainingStatus.RUNNING -> {
                             Button(
-                                onClick = { trainer.pauseTraining() },
+                                onClick = { trainer.pauseTraining(context) },
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(48.dp)
@@ -444,7 +498,7 @@ fun NeuralTrainingScreen(
                             }
 
                             Button(
-                                onClick = { trainer.stopTraining() },
+                                onClick = { trainer.stopTraining(context) },
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(48.dp)
@@ -459,7 +513,7 @@ fun NeuralTrainingScreen(
 
                         TrainingStatus.PAUSED -> {
                             Button(
-                                onClick = { trainer.resumeTraining() },
+                                onClick = { trainer.resumeTraining(context) },
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(48.dp)
@@ -472,7 +526,7 @@ fun NeuralTrainingScreen(
                             }
 
                             Button(
-                                onClick = { trainer.stopTraining() },
+                                onClick = { trainer.stopTraining(context) },
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(48.dp)
@@ -487,7 +541,7 @@ fun NeuralTrainingScreen(
                     }
 
                     IconButton(
-                        onClick = { trainer.resetTraining() },
+                        onClick = { trainer.resetTraining(context) },
                         modifier = Modifier
                             .size(48.dp)
                             .border(1.dp, BorderSubtle, RoundedCornerShape(8.dp))

@@ -3,6 +3,7 @@ package com.example.ui
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -66,6 +67,7 @@ import com.example.neural.DatasetRepository
 import com.example.neural.LocalNeuralTrainer
 import com.example.neural.ModelCheckpoint
 import com.example.neural.ModelCheckpointManager
+import com.example.ui.theme.BorderSubtle
 import com.example.ui.theme.CyberBackground
 import com.example.ui.theme.CyberSurface
 import com.example.ui.theme.CyberSurfaceCard
@@ -326,7 +328,7 @@ fun ModelStudioScreen(
                             .height(44.dp)
                             .testTag("import_model_saf_button"),
                         colors = ButtonDefaults.buttonColors(containerColor = CyberSurface, contentColor = ElectricCyan),
-                        border = ButtonDefaults.outlinedButtonBorder(enabled = true),
+                        border = BorderStroke(1.dp, BorderSubtle),
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(16.dp))

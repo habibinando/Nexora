@@ -247,6 +247,14 @@ object NdkNeuralAccelerator {
             flopCount += 2.0 * hiddenSize * hiddenSize
         }
 
+        // Normalize gradients by sequence length to align with avgLoss
+        val invSeqLen = 1.0f / seqLen.toFloat()
+        for (i in dWxh.indices) dWxh[i] *= invSeqLen
+        for (i in dWhh.indices) dWhh[i] *= invSeqLen
+        for (i in dWhy.indices) dWhy[i] *= invSeqLen
+        for (i in dBh.indices)  dBh[i]  *= invSeqLen
+        for (i in dBy.indices)  dBy[i]  *= invSeqLen
+
         // Gradient clipping
         var gradSqSum = 0.0
         for (g in dWxh) gradSqSum += g * g

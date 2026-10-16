@@ -1,5 +1,6 @@
 package com.example.neural
 
+import android.content.Context
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -84,15 +85,29 @@ class LocalNeuralTrainer(
     var activeModel: CharRNNModel? = null
         private set
 
-    private var trainingData: String = ""
-    private var seqLength: Int = 32
-    private var learningRate: Float = 0.01f
-    private var targetEpochs: Int = 5
+    var trainingData: String = ""
+        private set
+    var seqLength: Int = 32
+        private set
+    var learningRate: Float = 0.01f
+        private set
+    var targetEpochs: Int = 5
+        private set
 
     init {
         // Automatically initialize model with default dataset
         val defaultDataset = DatasetRepository.activeDataset.value
         createCustomModel(hiddenSize = 64, datasetText = defaultDataset.text)
+    }
+
+    /**
+     * Single canonical formula for number of valid sequence windows per epoch.
+     * Given text of length L and sequence length S:
+     * Valid start index i satisfies: i + 1 + S <= L ==> i <= L - S - 1.
+     * Count of valid indices 0 .. (L - S - 1) is: (L - S - 1) - 0 + 1 = L - S.
+     */
+    fun calculateStepsPerEpoch(textLength: Int, seqLen: Int): Int {
+        return (textLength - seqLen).coerceAtLeast(0)
     }
 
     /**
@@ -131,14 +146,15 @@ class LocalNeuralTrainer(
     }
 
     /**
-     * Starts or continues training loop using real BPTT gradients and cross-entropy loss.
+     * Starts a new training loop using real BPTT gradients and cross-entropy loss.
      */
     fun startTraining(
         datasetText: String,
         hiddenSize: Int = 64,
         seqLen: Int = 32,
         lr: Float = 0.01f,
-        epochs: Int = 5
+        epochs: Int = 5,
+        context: Context? = null
     ) {
         if (trainingJob?.isActive == true) return
 
@@ -154,32 +170,104 @@ class LocalNeuralTrainer(
         this.learningRate = lr.coerceIn(0.0001f, 0.5f)
         this.targetEpochs = epochs.coerceIn(1, 100)
 
-        if (text.length <= seqLength) {
+        val stepsPerEpoch = calculateStepsPerEpoch(text.length, seqLength)
+        if (stepsPerEpoch <= 0) {
             _telemetry.update {
-                it.copy(statusMessage = "Dataset terlalu pendek untuk sequence length $seqLength")
+                it.copy(statusMessage = "Dataset terlalu pendek (${text.length} char) untuk sequence length $seqLength")
             }
             return
         }
 
-        val stepsPerEpoch = (text.length - seqLength).coerceAtLeast(1)
         val totalSteps = stepsPerEpoch * targetEpochs
+
+        _telemetry.update {
+            it.copy(
+                status = TrainingStatus.RUNNING,
+                currentStep = 0,
+                totalSteps = totalSteps,
+                currentEpoch = 0,
+                totalEpochs = targetEpochs,
+                lossHistory = emptyList(),
+                statusMessage = "Melatih model secara real-time..."
+            )
+        }
+
+        runTrainingLoop(
+            model = model,
+            text = text,
+            stepsPerEpoch = stepsPerEpoch,
+            totalSteps = totalSteps,
+            initialStepCount = 0,
+            context = context
+        )
+    }
+
+    /**
+     * Resumes training from the exact saved step position.
+     */
+    fun resumeTraining(context: Context? = null) {
+        if (_telemetry.value.status != TrainingStatus.PAUSED && _telemetry.value.status != TrainingStatus.STOPPED) {
+            return
+        }
+
+        val model = activeModel ?: return
+        val text = trainingData
+        val stepsPerEpoch = calculateStepsPerEpoch(text.length, seqLength)
+        if (stepsPerEpoch <= 0) return
+
+        val totalSteps = stepsPerEpoch * targetEpochs
+        val currentStep = _telemetry.value.currentStep
+
+        if (currentStep >= totalSteps) {
+            _telemetry.update {
+                it.copy(
+                    status = TrainingStatus.COMPLETED,
+                    statusMessage = "Pelatihan telah selesai untuk seluruh $targetEpochs epoch."
+                )
+            }
+            return
+        }
 
         _telemetry.update {
             it.copy(
                 status = TrainingStatus.RUNNING,
                 totalSteps = totalSteps,
                 totalEpochs = targetEpochs,
-                statusMessage = "Melatih model secara real-time..."
+                statusMessage = "Melanjutkan pelatihan dari step $currentStep/$totalSteps..."
             )
         }
 
+        runTrainingLoop(
+            model = model,
+            text = text,
+            stepsPerEpoch = stepsPerEpoch,
+            totalSteps = totalSteps,
+            initialStepCount = currentStep,
+            context = context
+        )
+    }
+
+    private fun runTrainingLoop(
+        model: CharRNNModel,
+        text: String,
+        stepsPerEpoch: Int,
+        totalSteps: Int,
+        initialStepCount: Int,
+        context: Context?
+    ) {
+        trainingJob?.cancel()
+
         trainingJob = scope.launch(Dispatchers.Default) {
             try {
-                var stepCount = _telemetry.value.currentStep
+                var stepCount = initialStepCount
                 val lossList = _telemetry.value.lossHistory.toMutableList()
+                val startEpoch = stepCount / stepsPerEpoch
+                var periodicSaveCounter = 0
 
-                for (epoch in _telemetry.value.currentEpoch until targetEpochs) {
-                    for (i in 0 until (text.length - seqLength - 1)) {
+                for (epoch in startEpoch until targetEpochs) {
+                    val startStepInEpoch = if (epoch == startEpoch) stepCount % stepsPerEpoch else 0
+
+                    for (i in startStepInEpoch until stepsPerEpoch) {
                         if (!isActive) break
 
                         val inputSlice = text.substring(i, i + seqLength)
@@ -195,7 +283,7 @@ class LocalNeuralTrainer(
                         )
 
                         stepCount++
-                        if (lossList.size > 200) {
+                        if (lossList.size > 250) {
                             lossList.removeAt(0)
                         }
                         lossList.add(stepResult.loss)
@@ -217,20 +305,31 @@ class LocalNeuralTrainer(
                             )
                         }
 
-                        // Yield briefly to maintain responsive UI
+                        // Periodic durable snapshot save every 100 steps if context is available
+                        periodicSaveCounter++
+                        if (context != null && periodicSaveCounter % 100 == 0) {
+                            saveActiveSession(context)
+                        }
+
+                        // Yield briefly to maintain UI 60fps responsiveness
                         delay(2)
                     }
                 }
 
-                _telemetry.update {
-                    it.copy(
-                        status = TrainingStatus.COMPLETED,
-                        statusMessage = "Pelatihan selesai! Loss akhir: ${it.latestLoss ?: 0f}"
-                    )
+                if (stepCount >= totalSteps) {
+                    _telemetry.update {
+                        it.copy(
+                            status = TrainingStatus.COMPLETED,
+                            statusMessage = "Pelatihan selesai! Loss akhir: ${it.latestLoss ?: 0f}"
+                        )
+                    }
+                    if (context != null) {
+                        SessionPersistenceManager.clearSession(context)
+                    }
                 }
             } catch (e: CancellationException) {
                 _telemetry.update {
-                    it.copy(statusMessage = "Pelatihan dihentikan sementara")
+                    it.copy(statusMessage = "Pelatihan dijeda")
                 }
             } catch (e: Exception) {
                 _telemetry.update {
@@ -243,92 +342,18 @@ class LocalNeuralTrainer(
         }
     }
 
-    fun pauseTraining() {
+    fun pauseTraining(context: Context? = null) {
         trainingJob?.cancel()
         trainingJob = null
         _telemetry.update {
             it.copy(status = TrainingStatus.PAUSED, statusMessage = "Pelatihan dijeda")
         }
-    }
-
-    fun resumeTraining() {
-        if (_telemetry.value.status == TrainingStatus.PAUSED) {
-            val model = activeModel ?: return
-            val text = trainingData
-            val stepsPerEpoch = (text.length - seqLength).coerceAtLeast(1)
-            val totalSteps = stepsPerEpoch * targetEpochs
-
-            _telemetry.update {
-                it.copy(status = TrainingStatus.RUNNING, statusMessage = "Melanjutkan pelatihan...")
-            }
-
-            trainingJob = scope.launch(Dispatchers.Default) {
-                try {
-                    var stepCount = _telemetry.value.currentStep
-                    val lossList = _telemetry.value.lossHistory.toMutableList()
-
-                    for (epoch in (_telemetry.value.currentEpoch - 1).coerceAtLeast(0) until targetEpochs) {
-                        for (i in (stepCount % stepsPerEpoch) until (text.length - seqLength - 1)) {
-                            if (!isActive) break
-
-                            val inputSlice = text.substring(i, i + seqLength)
-                            val targetSlice = text.substring(i + 1, i + seqLength + 1)
-
-                            val inputIndices = IntArray(seqLength) { model.charToIdx[inputSlice[it]] ?: 0 }
-                            val targetIndices = IntArray(seqLength) { model.charToIdx[targetSlice[it]] ?: 0 }
-
-                            val stepResult = model.trainStep(
-                                inputIndices = inputIndices,
-                                targetIndices = targetIndices,
-                                learningRate = learningRate
-                            )
-
-                            stepCount++
-                            if (lossList.size > 200) {
-                                lossList.removeAt(0)
-                            }
-                            lossList.add(stepResult.loss)
-
-                            _telemetry.update {
-                                it.copy(
-                                    currentStep = stepCount,
-                                    currentEpoch = epoch + 1,
-                                    latestLoss = stepResult.loss,
-                                    lossHistory = lossList.toList(),
-                                    stepDurationMs = stepResult.durationMs,
-                                    gflops = stepResult.gflops,
-                                    gradientNorm = stepResult.gradientNorm,
-                                    isNdkAccelerated = stepResult.isNdkAccelerated,
-                                    statusMessage = "Epoch ${epoch + 1}/$targetEpochs - Step $stepCount/$totalSteps"
-                                )
-                            }
-                            delay(2)
-                        }
-                    }
-
-                    _telemetry.update {
-                        it.copy(
-                            status = TrainingStatus.COMPLETED,
-                            statusMessage = "Pelatihan selesai! Loss akhir: ${it.latestLoss ?: 0f}"
-                        )
-                    }
-                } catch (e: CancellationException) {
-                    _telemetry.update {
-                        it.copy(statusMessage = "Pelatihan dijeda")
-                    }
-                } catch (e: Exception) {
-                    _telemetry.update {
-                        it.copy(
-                            status = TrainingStatus.STOPPED,
-                            statusMessage = "Error: ${e.message}"
-                        )
-                    }
-                }
-            }
+        if (context != null) {
+            saveActiveSession(context)
         }
     }
 
-    fun stopTraining() {
+    fun stopTraining(context: Context? = null) {
         trainingJob?.cancel()
         trainingJob = null
         _telemetry.update {
@@ -337,16 +362,83 @@ class LocalNeuralTrainer(
                 statusMessage = "Pelatihan dihentikan oleh pengguna"
             )
         }
+        if (context != null) {
+            SessionPersistenceManager.clearSession(context)
+        }
     }
 
-    fun resetTraining() {
-        stopTraining()
+    fun resetTraining(context: Context? = null) {
+        stopTraining(context)
         _telemetry.update {
             TrainingTelemetry(
                 totalParameters = activeModel?.totalParameterCount,
                 hiddenSize = activeModel?.hiddenSize ?: 64,
                 vocabSize = activeModel?.vocabSize ?: 0,
                 statusMessage = "Pelatihan direset"
+            )
+        }
+        if (context != null) {
+            SessionPersistenceManager.clearSession(context)
+        }
+    }
+
+    /**
+     * Creates a durable snapshot of the current training session.
+     */
+    fun createSessionSnapshot(datasetName: String = "Dataset Aktif"): TrainingSessionSnapshot? {
+        val model = activeModel ?: return null
+        val tele = _telemetry.value
+        return TrainingSessionSnapshot(
+            version = SessionPersistenceManager.SESSION_VERSION,
+            currentStep = tele.currentStep,
+            totalSteps = tele.totalSteps,
+            currentEpoch = tele.currentEpoch,
+            totalEpochs = tele.totalEpochs,
+            seqLength = seqLength,
+            learningRate = learningRate,
+            latestLoss = tele.latestLoss,
+            initialLoss = tele.initialLoss,
+            lossHistory = tele.lossHistory,
+            datasetName = datasetName,
+            datasetText = trainingData,
+            modelBytes = model.serializeToBytes(),
+            timestamp = System.currentTimeMillis()
+        )
+    }
+
+    /**
+     * Persists active session snapshot to disk.
+     */
+    fun saveActiveSession(context: Context, datasetName: String = "Dataset Aktif"): Boolean {
+        val snapshot = createSessionSnapshot(datasetName) ?: return false
+        return SessionPersistenceManager.saveSession(context, snapshot)
+    }
+
+    /**
+     * Restores state from a durable snapshot.
+     */
+    fun restoreFromSnapshot(snapshot: TrainingSessionSnapshot) {
+        val restoredModel = CharRNNModel.deserializeFromBytes(snapshot.modelBytes)
+        activeModel = restoredModel
+        trainingData = snapshot.datasetText
+        seqLength = snapshot.seqLength
+        learningRate = snapshot.learningRate
+        targetEpochs = snapshot.totalEpochs
+
+        _telemetry.update {
+            TrainingTelemetry(
+                status = TrainingStatus.PAUSED,
+                currentStep = snapshot.currentStep,
+                totalSteps = snapshot.totalSteps,
+                currentEpoch = snapshot.currentEpoch,
+                totalEpochs = snapshot.totalEpochs,
+                latestLoss = snapshot.latestLoss,
+                initialLoss = snapshot.initialLoss,
+                lossHistory = snapshot.lossHistory,
+                totalParameters = restoredModel.totalParameterCount,
+                hiddenSize = restoredModel.hiddenSize,
+                vocabSize = restoredModel.vocabSize,
+                statusMessage = "Sesi dipulihkan dari snapshot (Step ${snapshot.currentStep}/${snapshot.totalSteps})"
             )
         }
     }
@@ -376,7 +468,7 @@ class LocalNeuralTrainer(
                     it + ChatMessage(
                         id = "nexora_${System.currentTimeMillis()}",
                         sender = ChatSender.NEXORA,
-                        text = "Model saraf belum dibuat. Silakan buka tab 'Model Studio' atau 'Training' terlebih dahulu untuk menginisialisasi arsitektur Nexora.",
+                        text = "Model saraf belum dibuat. Silakan buka tab 'Studio' atau 'Training' terlebih dahulu untuk menginisialisasi arsitektur Nexora.",
                         latencyMs = 0,
                         tokensGenerated = 0,
                         tokensPerSec = 0f,
@@ -387,7 +479,7 @@ class LocalNeuralTrainer(
                 return@launch
             }
 
-            // Real forward autoregressive inference from weights
+            // Real forward autoregressive inference from weights with aligned next-char state
             val generatedFull = model.generate(
                 seedText = trimmed,
                 length = maxTokens.coerceIn(10, 300),

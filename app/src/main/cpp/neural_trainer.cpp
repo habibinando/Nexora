@@ -244,6 +244,14 @@ Java_com_example_neural_NdkNeuralAccelerator_nativeTrainStep(
         flop_count += 2.0 * hidden_size * hidden_size;
     }
 
+    // Normalize gradients by sequence length so gradient scale matches avg_loss (mean cross-entropy)
+    float inv_seq_len = 1.0f / static_cast<float>(seq_len);
+    for (int i = 0; i < wxh_len; ++i) d_wxh[i] *= inv_seq_len;
+    for (int i = 0; i < whh_len; ++i) d_whh[i] *= inv_seq_len;
+    for (int i = 0; i < why_len; ++i) d_why[i] *= inv_seq_len;
+    for (int i = 0; i < bh_len;  ++i) d_bh[i]  *= inv_seq_len;
+    for (int i = 0; i < by_len;  ++i) d_by[i]  *= inv_seq_len;
+
     // Gradient clipping & L2 norm calculation
     double grad_sq_sum = 0.0;
     for (float g : d_wxh) grad_sq_sum += g * g;

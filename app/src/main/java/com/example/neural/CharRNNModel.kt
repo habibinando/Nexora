@@ -4,6 +4,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.EOFException
 import java.io.InputStream
 import java.io.OutputStream
 import java.security.MessageDigest
@@ -13,7 +14,7 @@ import kotlin.math.sqrt
 
 /**
  * Real On-Device Recurrent Neural Network (Nexora Char-RNN) Model.
- * Computes real forward inference, real parameter counts, and real serialized sizes.
+ * Computes real forward inference, real parameter counts, and strict binary serialization.
  */
 class CharRNNModel(
     val vocab: List<Char>,
@@ -35,6 +36,9 @@ class CharRNNModel(
         get() = (wxh.size + whh.size + why.size + bh.size + by.size).toLong()
 
     init {
+        require(vocabSize in 1..MAX_ALLOWED_VOCAB) { "Vocab size $vocabSize harus antara 1 dan $MAX_ALLOWED_VOCAB" }
+        require(hiddenSize in MIN_ALLOWED_HIDDEN..MAX_ALLOWED_HIDDEN) { "Hidden size $hiddenSize harus antara $MIN_ALLOWED_HIDDEN dan $MAX_ALLOWED_HIDDEN" }
+
         val rand = Random(seed)
         // Xavier / Glorot initialization
         val stdWxh = 1.0f / sqrt(vocabSize.coerceAtLeast(1).toFloat())
@@ -69,6 +73,10 @@ class CharRNNModel(
 
     /**
      * Generates text continuation token by token using real forward inference.
+     * Aligns inference state with target next-character prediction:
+     * 1. Seed primes hidden state h up to seedText.last().
+     * 2. Logits for the next character are computed directly from this primed h.
+     * 3. Once nextChar is sampled, h is advanced by forwardOneStep(nextChar, h) for subsequent steps.
      */
     fun generate(
         seedText: String,
@@ -78,23 +86,25 @@ class CharRNNModel(
         if (vocab.isEmpty() || length <= 0) return seedText
 
         var h = FloatArray(hiddenSize)
-        val sb = StringBuilder(seedText)
-        var lastChar = seedText.lastOrNull() ?: vocab.first()
 
-        // Prime the hidden state with the seed
-        for (c in seedText) {
-            val idx = charToIdx[c] ?: 0
-            h = forwardOneStep(idx, h)
+        // 1. Prime the hidden state with the seedText without double-processing
+        if (seedText.isNotEmpty()) {
+            for (c in seedText) {
+                val idx = charToIdx[c] ?: 0
+                h = forwardOneStep(idx, h)
+            }
+        } else {
+            // Default priming if seed is empty
+            h = forwardOneStep(0, h)
         }
 
+        val sb = StringBuilder(seedText)
         val effectiveTemp = temperature.coerceIn(0.1f, 2.0f)
         val rand = Random()
 
+        // 2. Autoregressive generation
         for (step in 0 until length) {
-            val idx = charToIdx[lastChar] ?: 0
-            h = forwardOneStep(idx, h)
-
-            // Compute output logits
+            // Compute output projection logits directly from current context h
             val logits = FloatArray(vocabSize)
             var maxLogit = -1e9f
             for (k in 0 until vocabSize) {
@@ -107,7 +117,7 @@ class CharRNNModel(
                 if (logits[k] > maxLogit) maxLogit = logits[k]
             }
 
-            // Softmax with temperature
+            // Softmax with temperature scaling
             var sumExp = 0.0f
             for (k in 0 until vocabSize) {
                 logits[k] = exp(logits[k] - maxLogit)
@@ -128,7 +138,9 @@ class CharRNNModel(
 
             val nextChar = idxToChar[chosenIdx] ?: ' '
             sb.append(nextChar)
-            lastChar = nextChar
+
+            // Advance hidden state with the newly sampled token for the next prediction
+            h = forwardOneStep(chosenIdx, h)
         }
 
         return sb.toString()
@@ -152,7 +164,7 @@ class CharRNNModel(
         return digest.digest().joinToString("") { "%02x".format(it) }.take(12)
     }
 
-    private fun forwardOneStep(xIdx: Int, prevH: FloatArray): FloatArray {
+    fun forwardOneStep(xIdx: Int, prevH: FloatArray): FloatArray {
         val nextH = FloatArray(hiddenSize)
         val clampedIdx = xIdx.coerceIn(0, vocabSize - 1)
         for (i in 0 until hiddenSize) {
@@ -178,7 +190,7 @@ class CharRNNModel(
     fun serializeToStream(outputStream: OutputStream) {
         val dos = DataOutputStream(outputStream)
         dos.writeInt(MAGIC_HEADER_NEXORA)
-        dos.writeInt(1) // version
+        dos.writeInt(SUPPORTED_VERSION)
         dos.writeInt(vocabSize)
         for (c in vocab) {
             dos.writeChar(c.code)
@@ -202,41 +214,79 @@ class CharRNNModel(
     companion object {
         const val MAGIC_HEADER_NEXORA = 0x4E45584F // "NEXO"
         const val MAGIC_HEADER_LEGACY = 0x4E455552 // "NEUR"
+        const val SUPPORTED_VERSION = 1
+
+        const val MAX_ALLOWED_VOCAB = 10_000
+        const val MIN_ALLOWED_HIDDEN = 4
+        const val MAX_ALLOWED_HIDDEN = 2048
 
         fun deserializeFromBytes(bytes: ByteArray): CharRNNModel {
             return deserializeFromStream(ByteArrayInputStream(bytes))
         }
 
+        /**
+         * Strictly validates magic header, version, vocabulary boundaries,
+         * tensor dimensions, truncated stream EOF, and finite float values.
+         */
         fun deserializeFromStream(inputStream: InputStream): CharRNNModel {
             val dis = DataInputStream(inputStream)
-            val magic = dis.readInt()
-            require(magic == MAGIC_HEADER_NEXORA || magic == MAGIC_HEADER_LEGACY) {
-                "Format file model tidak valid. Header tidak cocok."
-            }
-            val version = dis.readInt()
-            val vocabSize = dis.readInt()
-            val vocabList = ArrayList<Char>(vocabSize)
-            for (i in 0 until vocabSize) {
-                vocabList.add(dis.readChar())
-            }
-            val hiddenSize = dis.readInt()
-
-            val model = CharRNNModel(vocabList, hiddenSize)
-
-            fun readFloats(target: FloatArray) {
-                val size = dis.readInt()
-                for (i in 0 until size.coerceAtMost(target.size)) {
-                    target[i] = dis.readFloat()
+            try {
+                val magic = dis.readInt()
+                if (magic != MAGIC_HEADER_NEXORA && magic != MAGIC_HEADER_LEGACY) {
+                    throw IllegalArgumentException("Format file model tidak dikenal (magic header 0x${Integer.toHexString(magic).uppercase()} tidak valid).")
                 }
+
+                val version = dis.readInt()
+                if (version != SUPPORTED_VERSION) {
+                    throw IllegalArgumentException("Versi model ($version) tidak didukung. Versi yang didukung adalah $SUPPORTED_VERSION.")
+                }
+
+                val vocabSize = dis.readInt()
+                if (vocabSize <= 0 || vocabSize > MAX_ALLOWED_VOCAB) {
+                    throw IllegalArgumentException("Dimensi vocabulary ($vocabSize) di luar batas aman (1..$MAX_ALLOWED_VOCAB).")
+                }
+
+                val vocabList = ArrayList<Char>(vocabSize)
+                val uniqueCheck = HashSet<Char>(vocabSize)
+                for (i in 0 until vocabSize) {
+                    val c = dis.readChar()
+                    if (!uniqueCheck.add(c)) {
+                        throw IllegalArgumentException("Karakter duplikat dalam vocabulary ditemukan: '$c'.")
+                    }
+                    vocabList.add(c)
+                }
+
+                val hiddenSize = dis.readInt()
+                if (hiddenSize < MIN_ALLOWED_HIDDEN || hiddenSize > MAX_ALLOWED_HIDDEN) {
+                    throw IllegalArgumentException("Dimensi hidden size ($hiddenSize) di luar batas aman ($MIN_ALLOWED_HIDDEN..$MAX_ALLOWED_HIDDEN).")
+                }
+
+                val model = CharRNNModel(vocabList, hiddenSize)
+
+                fun readFloatsStrict(tensorName: String, target: FloatArray) {
+                    val size = dis.readInt()
+                    if (size != target.size) {
+                        throw IllegalArgumentException("Ukuran tensor '$tensorName' tidak cocok: diharapkan ${target.size} float, ditemukan $size float.")
+                    }
+                    for (i in target.indices) {
+                        val f = dis.readFloat()
+                        if (f.isNaN() || f.isInfinite()) {
+                            throw IllegalArgumentException("Nilai non-finite (NaN/Inf) terdeteksi pada tensor '$tensorName' indeks $i: $f.")
+                        }
+                        target[i] = f
+                    }
+                }
+
+                readFloatsStrict("wxh", model.wxh)
+                readFloatsStrict("whh", model.whh)
+                readFloatsStrict("why", model.why)
+                readFloatsStrict("bh", model.bh)
+                readFloatsStrict("by", model.by)
+
+                return model
+            } catch (e: EOFException) {
+                throw IllegalArgumentException("Data file model terpotong sebelum semua bobot selesai dibaca (stream truncated).", e)
             }
-
-            readFloats(model.wxh)
-            readFloats(model.whh)
-            readFloats(model.why)
-            readFloats(model.bh)
-            readFloats(model.by)
-
-            return model
         }
     }
 }
