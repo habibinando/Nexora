@@ -31,3 +31,10 @@ target_link_libraries(
     neural_trainer_jni
     ${log-lib}
 )
+
+# 16 KB page size alignment for Android 15+ / 16 KB kernel architecture compatibility
+target_link_options(
+    neural_trainer_jni
+    PRIVATE
+    "-Wl,-z,max-page-size=16384"
+)

@@ -1,12 +1,18 @@
 package com.example.neural
 
 import android.content.Context
+import android.os.Build
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.EOFException
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 data class TrainingSessionSnapshot(
     val version: Int = 1,
@@ -83,10 +89,13 @@ object SessionPersistenceManager {
         return file.exists() && file.length() > 0
     }
 
-    fun saveSession(context: Context, snapshot: TrainingSessionSnapshot): Boolean {
-        return try {
+    /**
+     * Atomically saves session snapshot to disk on Dispatchers.IO with fsync.
+     */
+    suspend fun saveSession(context: Context, snapshot: TrainingSessionSnapshot): Boolean = withContext(Dispatchers.IO) {
+        try {
             val file = getSessionFile(context)
-            val tempFile = File(file.parentFile, "${file.name}.tmp")
+            val tempFile = File(file.parentFile, "${file.name}.tmp_${System.nanoTime()}")
 
             val baos = ByteArrayOutputStream()
             val dos = DataOutputStream(baos)
@@ -123,27 +132,66 @@ object SessionPersistenceManager {
             dos.flush()
             val bytes = baos.toByteArray()
 
-            tempFile.writeBytes(bytes)
-            if (tempFile.renameTo(file)) {
-                true
+            FileOutputStream(tempFile).use { fos ->
+                fos.write(bytes)
+                fos.flush()
+                fos.fd.sync()
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                try {
+                    Files.move(
+                        tempFile.toPath(),
+                        file.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING
+                    )
+                    true
+                } catch (e: Exception) {
+                    Files.move(
+                        tempFile.toPath(),
+                        file.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING
+                    )
+                    true
+                }
             } else {
-                file.delete()
-                tempFile.renameTo(file)
+                if (!tempFile.renameTo(file)) {
+                    file.delete()
+                    tempFile.renameTo(file)
+                } else {
+                    true
+                }
             }
         } catch (e: Exception) {
             false
         }
     }
 
-    fun loadSession(context: Context): TrainingSessionSnapshot? {
-        val file = getSessionFile(context)
-        if (!file.exists() || file.length() == 0L) return null
+    fun saveSessionBlocking(context: Context, snapshot: TrainingSessionSnapshot): Boolean {
+        return kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+            saveSession(context, snapshot)
+        }
+    }
 
-        return try {
+    /**
+     * Loads session snapshot from disk on Dispatchers.IO.
+     */
+    suspend fun loadSession(context: Context): TrainingSessionSnapshot? = withContext(Dispatchers.IO) {
+        val file = getSessionFile(context)
+        if (!file.exists() || file.length() == 0L) return@withContext null
+
+        try {
             val bytes = file.readBytes()
             deserializeSession(bytes)
         } catch (e: Exception) {
             null
+        }
+    }
+
+    fun loadSessionBlocking(context: Context): TrainingSessionSnapshot? {
+        return kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+            loadSession(context)
         }
     }
 

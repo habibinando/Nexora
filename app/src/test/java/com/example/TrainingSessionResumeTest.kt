@@ -149,7 +149,7 @@ class TrainingSessionResumeTest {
     }
 
     @Test
-    fun `test durable session snapshot persistence and process recreation resume`() {
+    fun `test durable session snapshot persistence and process recreation resume`() = kotlinx.coroutines.test.runTest(testDispatcher) {
         val context = ApplicationProvider.getApplicationContext<Context>()
         SessionPersistenceManager.clearSession(context)
 

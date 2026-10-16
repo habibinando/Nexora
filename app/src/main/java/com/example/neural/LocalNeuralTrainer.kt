@@ -263,6 +263,19 @@ class LocalNeuralTrainer(
                 val lossList = _telemetry.value.lossHistory.toMutableList()
                 val startEpoch = stepCount / stepsPerEpoch
                 var periodicSaveCounter = 0
+                var lastUiUpdateMs = System.currentTimeMillis()
+                val trainingStartWallTime = System.currentTimeMillis()
+
+                if (context != null) {
+                    NeuralTrainingForegroundService.startService(
+                        context = context,
+                        epoch = startEpoch + 1,
+                        totalEpochs = targetEpochs,
+                        step = stepCount,
+                        totalSteps = totalSteps,
+                        loss = _telemetry.value.latestLoss ?: 0f
+                    )
+                }
 
                 for (epoch in startEpoch until targetEpochs) {
                     val startStepInEpoch = if (epoch == startEpoch) stepCount % stepsPerEpoch else 0
@@ -290,29 +303,43 @@ class LocalNeuralTrainer(
 
                         val initLoss = _telemetry.value.initialLoss ?: stepResult.loss
 
-                        _telemetry.update {
-                            it.copy(
-                                currentStep = stepCount,
-                                currentEpoch = epoch + 1,
-                                latestLoss = stepResult.loss,
-                                initialLoss = initLoss,
-                                lossHistory = lossList.toList(),
-                                stepDurationMs = stepResult.durationMs,
-                                gflops = stepResult.gflops,
-                                gradientNorm = stepResult.gradientNorm,
-                                isNdkAccelerated = stepResult.isNdkAccelerated,
-                                statusMessage = "Epoch ${epoch + 1}/$targetEpochs - Step $stepCount/$totalSteps"
-                            )
+                        val now = System.currentTimeMillis()
+                        val shouldUpdateUi = (stepCount % 5 == 0) || (now - lastUiUpdateMs >= 60) || (stepCount >= totalSteps)
+
+                        if (shouldUpdateUi) {
+                            lastUiUpdateMs = now
+                            _telemetry.update {
+                                it.copy(
+                                    currentStep = stepCount,
+                                    currentEpoch = epoch + 1,
+                                    latestLoss = stepResult.loss,
+                                    initialLoss = initLoss,
+                                    lossHistory = lossList.toList(),
+                                    stepDurationMs = stepResult.durationMs,
+                                    gflops = stepResult.gflops,
+                                    gradientNorm = stepResult.gradientNorm,
+                                    isNdkAccelerated = stepResult.isNdkAccelerated,
+                                    statusMessage = "Epoch ${epoch + 1}/$targetEpochs - Step $stepCount/$totalSteps"
+                                )
+                            }
+
+                            if (context != null && stepCount % 25 == 0) {
+                                NeuralTrainingForegroundService.updateProgress(
+                                    context = context,
+                                    epoch = epoch + 1,
+                                    totalEpochs = targetEpochs,
+                                    step = stepCount,
+                                    totalSteps = totalSteps,
+                                    loss = stepResult.loss
+                                )
+                            }
                         }
 
-                        // Periodic durable snapshot save every 100 steps if context is available
+                        // Periodic atomic snapshot save every 100 steps if context is available
                         periodicSaveCounter++
                         if (context != null && periodicSaveCounter % 100 == 0) {
                             saveActiveSession(context)
                         }
-
-                        // Yield briefly to maintain UI 60fps responsiveness
-                        delay(2)
                     }
                 }
 
@@ -324,6 +351,28 @@ class LocalNeuralTrainer(
                         )
                     }
                     if (context != null) {
+                        NeuralTrainingForegroundService.stopService(context)
+                        try {
+                            val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
+                            if (auth.currentUser != null) {
+                                val sync = FirestoreSyncManager.create(context)
+                                val durationSec = ((System.currentTimeMillis() - trainingStartWallTime) / 1000L).coerceAtLeast(1L)
+                                sync.recordTrainingRun(
+                                    datasetName = "Dataset On-Device",
+                                    hiddenSize = model.hiddenSize,
+                                    seqLen = seqLength,
+                                    learningRate = learningRate,
+                                    targetEpochs = targetEpochs,
+                                    totalSteps = totalSteps,
+                                    finalLoss = _telemetry.value.latestLoss ?: 0f,
+                                    initialLoss = _telemetry.value.initialLoss ?: 0f,
+                                    isNdkAccelerated = _telemetry.value.isNdkAccelerated,
+                                    durationSeconds = durationSec
+                                )
+                            }
+                        } catch (e: Exception) {
+                            // Non-fatal cloud sync
+                        }
                         SessionPersistenceManager.clearSession(context)
                     }
                 }
@@ -331,12 +380,18 @@ class LocalNeuralTrainer(
                 _telemetry.update {
                     it.copy(statusMessage = "Pelatihan dijeda")
                 }
+                if (context != null) {
+                    NeuralTrainingForegroundService.stopService(context)
+                }
             } catch (e: Exception) {
                 _telemetry.update {
                     it.copy(
                         status = TrainingStatus.STOPPED,
                         statusMessage = "Error: ${e.message}"
                     )
+                }
+                if (context != null) {
+                    NeuralTrainingForegroundService.stopService(context)
                 }
             }
         }
@@ -349,6 +404,7 @@ class LocalNeuralTrainer(
             it.copy(status = TrainingStatus.PAUSED, statusMessage = "Pelatihan dijeda")
         }
         if (context != null) {
+            NeuralTrainingForegroundService.stopService(context)
             saveActiveSession(context)
         }
     }
@@ -363,6 +419,7 @@ class LocalNeuralTrainer(
             )
         }
         if (context != null) {
+            NeuralTrainingForegroundService.stopService(context)
             SessionPersistenceManager.clearSession(context)
         }
     }
@@ -411,7 +468,10 @@ class LocalNeuralTrainer(
      */
     fun saveActiveSession(context: Context, datasetName: String = "Dataset Aktif"): Boolean {
         val snapshot = createSessionSnapshot(datasetName) ?: return false
-        return SessionPersistenceManager.saveSession(context, snapshot)
+        scope.launch(Dispatchers.IO) {
+            SessionPersistenceManager.saveSession(context, snapshot)
+        }
+        return true
     }
 
     /**

@@ -3,8 +3,14 @@ package com.example.neural
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -32,6 +38,17 @@ object ModelCheckpointManager {
         return dir
     }
 
+    /**
+     * Atomically saves model checkpoint with fsync and rename on Dispatchers.IO.
+     */
+    suspend fun saveCheckpointAsync(
+        context: Context,
+        model: CharRNNModel,
+        customName: String? = null
+    ): ModelCheckpoint = withContext(Dispatchers.IO) {
+        saveCheckpoint(context, model, customName)
+    }
+
     fun saveCheckpoint(
         context: Context,
         model: CharRNNModel,
@@ -43,9 +60,36 @@ object ModelCheckpointManager {
         val safeName = customName?.replace(Regex("[^a-zA-Z0-9_]"), "_")?.ifBlank { null }
             ?: "nexora_model_$dateStr"
         val file = File(dir, "$safeName.nexora")
+        val tempFile = File(dir, "$safeName.nexora.tmp_${System.nanoTime()}")
 
         val bytes = model.serializeToBytes()
-        file.writeBytes(bytes)
+        FileOutputStream(tempFile).use { fos ->
+            fos.write(bytes)
+            fos.flush()
+            fos.fd.sync()
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                Files.move(
+                    tempFile.toPath(),
+                    file.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+            } catch (e: Exception) {
+                Files.move(
+                    tempFile.toPath(),
+                    file.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+            }
+        } else {
+            if (!tempFile.renameTo(file)) {
+                file.delete()
+                tempFile.renameTo(file)
+            }
+        }
 
         val sizeBytes = file.length()
         val displayDate = SimpleDateFormat("dd MMM yyyy, HH:mm:ss", Locale.getDefault()).format(Date(timestamp))
@@ -63,6 +107,10 @@ object ModelCheckpointManager {
             hiddenSize = model.hiddenSize,
             checksum = checksum
         )
+    }
+
+    suspend fun listCheckpointsAsync(context: Context): List<ModelCheckpoint> = withContext(Dispatchers.IO) {
+        listCheckpoints(context)
     }
 
     fun listCheckpoints(context: Context): List<ModelCheckpoint> {

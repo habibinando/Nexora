@@ -124,7 +124,11 @@ fun NeuralTrainingScreen(
     var showSaveDialog by remember { mutableStateOf(false) }
     var checkpointNameInput by remember { mutableStateOf("") }
     var saveResultMessage by remember { mutableStateOf<String?>(null) }
-    var savedSessionSnapshot by remember { mutableStateOf(com.example.neural.SessionPersistenceManager.loadSession(context)) }
+    var savedSessionSnapshot by remember { mutableStateOf<com.example.neural.TrainingSessionSnapshot?>(null) }
+
+    LaunchedEffect(Unit) {
+        savedSessionSnapshot = com.example.neural.SessionPersistenceManager.loadSession(context)
+    }
 
     val scrollState = rememberScrollState()
 
