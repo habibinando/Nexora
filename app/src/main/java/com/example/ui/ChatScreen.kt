@@ -235,7 +235,7 @@ fun ChatScreen(
                     .fillMaxWidth()
                     .padding(top = 8.dp),
                 colors = CardDefaults.cardColors(containerColor = CyberSurface),
-                border = ButtonDefaults.outlinedButtonBorder
+                border = CardDefaults.outlinedCardBorder()
             ) {
                 Row(
                     modifier = Modifier.padding(10.dp),
@@ -423,7 +423,7 @@ fun ChatMessageItem(message: ChatMessage) {
                         containerColor = if (isUser) CyberSurfaceCard else CyberSurface
                     ),
                     border = if (!isUser) {
-                        ButtonDefaults.outlinedButtonBorder
+                        CardDefaults.outlinedCardBorder()
                     } else null
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {

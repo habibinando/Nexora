@@ -134,7 +134,7 @@ fun DatasetManagerScreen(
                     .fillMaxWidth()
                     .padding(bottom = 12.dp),
                 colors = CardDefaults.cardColors(containerColor = CyberSurface),
-                border = ButtonDefaults.outlinedButtonBorder
+                border = CardDefaults.outlinedCardBorder()
             ) {
                 Text(
                     text = msg,

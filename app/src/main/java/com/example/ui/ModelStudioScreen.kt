@@ -174,7 +174,7 @@ fun ModelStudioScreen(
                     .fillMaxWidth()
                     .padding(bottom = 12.dp),
                 colors = CardDefaults.cardColors(containerColor = CyberSurface),
-                border = ButtonDefaults.outlinedButtonBorder
+                border = CardDefaults.outlinedCardBorder()
             ) {
                 Text(
                     text = msg,
@@ -326,7 +326,7 @@ fun ModelStudioScreen(
                             .height(44.dp)
                             .testTag("import_model_saf_button"),
                         colors = ButtonDefaults.buttonColors(containerColor = CyberSurface, contentColor = ElectricCyan),
-                        border = ButtonDefaults.outlinedButtonBorder,
+                        border = ButtonDefaults.outlinedButtonBorder(enabled = true),
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(16.dp))
