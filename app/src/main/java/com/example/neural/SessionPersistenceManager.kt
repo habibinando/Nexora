@@ -120,12 +120,16 @@ object SessionPersistenceManager {
                 dos.writeFloat(loss)
             }
 
-            dos.writeUTF(snapshot.datasetName)
+            // DataOutputStream.writeUTF memiliki batas keras 65535 byte.
+            // Potong nama dataset jika terlalu panjang agar tidak melempar UTFDataFormatException.
+            val nameBytesUtf8 = snapshot.datasetName.toByteArray(Charsets.UTF_8)
+            val safeDatasetName = if (nameBytesUtf8.size > 65000) snapshot.datasetName.take(20000) else snapshot.datasetName
+            dos.writeUTF(safeDatasetName)
             val textBytes = snapshot.datasetText.toByteArray(Charsets.UTF_8)
-            dos.writeInt(textBytes.size)
+            dos.writeLong(textBytes.size)
             dos.write(textBytes)
 
-            dos.writeInt(snapshot.modelBytes.size)
+            dos.writeLong(snapshot.modelBytes.size)
             dos.write(snapshot.modelBytes)
             dos.writeLong(snapshot.timestamp)
 
