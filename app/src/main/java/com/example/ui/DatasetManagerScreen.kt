@@ -69,7 +69,9 @@ import com.example.ui.theme.NeuralGreen
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.TextTertiary
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -82,9 +84,15 @@ fun DatasetManagerScreen(
     val coroutineScope = rememberCoroutineScope()
     val activeDataset by DatasetRepository.activeDataset.collectAsState()
 
-    var customInputText by remember { mutableStateOf(activeDataset.text) }
+    // Jika dataset aktif terlalu besar, editor hanya menampilkan pratinjau (read-only)
+    // agar Compose TextField tidak me-layout teks MB-an yang memicu ANR/OOM.
+    var editorReadOnlyLarge by remember { mutableStateOf(activeDataset.isTooLargeForEditor) }
+    var customInputText by remember {
+        mutableStateOf(if (activeDataset.isTooLargeForEditor) activeDataset.previewText else activeDataset.text)
+    }
     var selectedPreset by remember { mutableIntStateOf(0) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
+    var statusIsError by remember { mutableStateOf(false) }
 
     // SAF File Picker for .txt, .json, .csv, .md
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -96,11 +104,29 @@ fun DatasetManagerScreen(
                 val result = DatasetRepository.importFromFileUri(context, uri, fileName)
                 if (result.isSuccess) {
                     val dataset = result.getOrThrow()
-                    customInputText = dataset.text
-                    trainer.createCustomModel(datasetText = dataset.text)
-                    statusMessage = "Berhasil mengimpor: ${dataset.name} (${dataset.characterCount} karakter, ${dataset.uniqueVocabSize} vocab unik)"
+                    if (dataset.isTooLargeForEditor) {
+                        // JANGAN masukkan teks penuh ke state editor — cukup pratinjau.
+                        editorReadOnlyLarge = true
+                        customInputText = dataset.previewText
+                        statusIsError = false
+                        statusMessage = "Berhasil mengimpor: ${dataset.name} (${dataset.characterCount} karakter, " +
+                            "${dataset.uniqueVocabSize} vocab unik). Dataset terlalu besar untuk diedit di layar; " +
+                            "pratinjau ditampilkan dan konten penuh dipakai untuk pelatihan."
+                    } else {
+                        editorReadOnlyLarge = false
+                        customInputText = dataset.text
+                        statusIsError = false
+                        statusMessage = "Berhasil mengimpor: ${dataset.name} (${dataset.characterCount} karakter, " +
+                            "${dataset.uniqueVocabSize} vocab unik)"
+                    }
+                    // Pembuatan model (alokasi matriks + vocab sort) dipindah ke background thread
+                    // agar tidak membekukan UI (ANR) untuk dataset besar.
+                    withContext(Dispatchers.Default) {
+                        trainer.createCustomModel(datasetText = dataset.text)
+                    }
                     onDatasetChanged()
                 } else {
+                    statusIsError = true
                     statusMessage = "Gagal membaca file: ${result.exceptionOrNull()?.message}"
                 }
             }
@@ -121,7 +147,8 @@ fun DatasetManagerScreen(
             Text("Manajemen & Impor Dataset", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
         }
         Text(
-            "Impor file teks mentah Anda sendiri atau gunakan korpus bawaan untuk melatih model Nexora secara on-device.",
+            "Impor file teks mentah Anda sendiri atau gunakan korpus bawaan untuk melatih model Nexora secara on-device. " +
+                "Batas ukuran file impor: 5 MB.",
             color = TextSecondary,
             fontSize = 12.sp,
             modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
@@ -138,7 +165,7 @@ fun DatasetManagerScreen(
             ) {
                 Text(
                     text = msg,
-                    color = NeuralGreen,
+                    color = if (statusIsError) Color(0xFFFF6B6B) else NeuralGreen,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(12.dp)
                 )
@@ -154,7 +181,6 @@ fun DatasetManagerScreen(
             Column(modifier = Modifier.padding(16.dp)) {
                 Text("Pilih Sumber Dataset", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                 Spacer(modifier = Modifier.height(10.dp))
-
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -175,11 +201,9 @@ fun DatasetManagerScreen(
                         Text("Impor File .txt/.json", fontSize = 12.sp)
                     }
                 }
-
                 Spacer(modifier = Modifier.height(12.dp))
                 Text("Atau pilih Korpus Kurasi:", color = TextSecondary, fontSize = 12.sp)
                 Spacer(modifier = Modifier.height(6.dp))
-
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -191,8 +215,10 @@ fun DatasetManagerScreen(
                             onClick = {
                                 selectedPreset = index
                                 DatasetRepository.selectPresetDataset(index)
+                                editorReadOnlyLarge = false
                                 customInputText = DatasetRepository.activeDataset.value.text
                                 trainer.createCustomModel(datasetText = customInputText)
+                                statusIsError = false
                                 statusMessage = "Mengaktifkan korpus: $label"
                                 onDatasetChanged()
                             },
@@ -213,7 +239,6 @@ fun DatasetManagerScreen(
         // Real Analytics Metrics Cards
         Text("Metrik Dataset Aktual", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         Spacer(modifier = Modifier.height(8.dp))
-
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -229,9 +254,7 @@ fun DatasetManagerScreen(
                 modifier = Modifier.weight(1f)
             )
         }
-
         Spacer(modifier = Modifier.height(8.dp))
-
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -263,14 +286,35 @@ fun DatasetManagerScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("Editor Teks Dataset", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                    Text("${customInputText.length} karakter", color = TextSecondary, fontSize = 11.sp)
+                    Text(
+                        if (editorReadOnlyLarge) {
+                            "pratinjau ${customInputText.length} / ${activeDataset.characterCount} karakter"
+                        } else {
+                            "${customInputText.length} karakter"
+                        },
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    )
                 }
-
+                if (editorReadOnlyLarge) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        "Konten penuh (${activeDataset.characterCount} karakter) akan digunakan untuk pelatihan. " +
+                            "Editor dinonaktifkan (read-only) untuk mencegah lag/ANR pada dataset besar.",
+                        color = NeuralGreen,
+                        fontSize = 11.sp
+                    )
+                }
                 Spacer(modifier = Modifier.height(8.dp))
-
                 OutlinedTextField(
                     value = customInputText,
-                    onValueChange = { customInputText = it },
+                    onValueChange = {
+                        if (!editorReadOnlyLarge) {
+                            customInputText = it
+                        }
+                    },
+                    readOnly = editorReadOnlyLarge,
+                    enabled = !editorReadOnlyLarge,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(180.dp)
@@ -281,24 +325,41 @@ fun DatasetManagerScreen(
                         focusedBorderColor = ElectricCyan,
                         unfocusedBorderColor = CyberSurface,
                         focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary
+                        unfocusedTextColor = TextPrimary,
+                        disabledContainerColor = CyberSurface,
+                        disabledTextColor = TextSecondary,
+                        disabledBorderColor = CyberSurface
                     ),
                     textStyle = androidx.compose.ui.text.TextStyle(
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
                         lineHeight = 16.sp
                     ),
-                    placeholder = { Text("Tulis atau tempel teks dataset di sini...", color = TextTertiary) }
+                    placeholder = {
+                        Text(
+                            if (editorReadOnlyLarge) "Pratinjau dataset (read-only)" else "Tulis atau tempel teks dataset di sini...",
+                            color = TextTertiary
+                        )
+                    }
                 )
-
                 Spacer(modifier = Modifier.height(10.dp))
-
                 Button(
                     onClick = {
-                        DatasetRepository.setCustomTextDataset("Teks Editor", customInputText)
-                        trainer.createCustomModel(datasetText = customInputText)
-                        statusMessage = "Dataset kustom berhasil diterapkan ke model aktif."
-                        onDatasetChanged()
+                        // Jika dataset besar, gunakan teks penuh dari repository (bukan pratinjau editor).
+                        val textToApply = if (editorReadOnlyLarge) {
+                            DatasetRepository.activeDataset.value.text
+                        } else {
+                            customInputText
+                        }
+                        coroutineScope.launch {
+                            withContext(Dispatchers.Default) {
+                                DatasetRepository.setCustomTextDataset("Teks Editor", textToApply)
+                                trainer.createCustomModel(datasetText = textToApply)
+                            }
+                            statusIsError = false
+                            statusMessage = "Dataset kustom berhasil diterapkan ke model aktif."
+                            onDatasetChanged()
+                        }
                     },
                     modifier = Modifier
                         .fillMaxWidth()
@@ -326,7 +387,6 @@ fun DatasetManagerScreen(
                 Text("Distribusi Frekuensi Token (Top 25)", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                 Text("Karakter paling sering muncul yang dipelajari matriks embedding Wxh:", color = TextSecondary, fontSize = 11.sp)
                 Spacer(modifier = Modifier.height(10.dp))
-
                 FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -383,7 +443,12 @@ private fun formatBytes(bytes: Long): String {
 private fun queryFileName(context: Context, uri: Uri): String? {
     var name: String? = null
     try {
-        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        // Proyeksi terbatas hanya kolom nama (lebih efisien dibanding null/proyeksi semua kolom)
+        context.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null, null, null
+        )?.use { cursor ->
             val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
             if (nameIndex != -1 && cursor.moveToFirst()) {
                 name = cursor.getString(nameIndex)
