@@ -19,3 +19,13 @@ local.properties
 debug.keystore
 *.apk
 .build-outputs/
+
+# Secrets and signing material (never commit)
+.env.*
+!.env.example
+*.jks
+*.keystore
+!debug.keystore.base64
+*.p12
+keystore.properties
+google-services.json
