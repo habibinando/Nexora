@@ -286,7 +286,7 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     }
     g_load_progress.store(0.90f, std::memory_order_relaxed);
 
-    const int32_t requested = std::max(512, std::min(8192, static_cast<int32_t>(context_size)));
+    const int32_t requested = std::clamp(static_cast<int32_t>(context_size), 512, 100000);
     const int32_t trained = llama_model_n_ctx_train(g_model);
     g_context_size = trained > 0 ? std::min(requested, trained) : requested;
     g_context_size = std::max(512, g_context_size);
@@ -345,6 +345,12 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
 extern "C" JNIEXPORT jfloat JNICALL
 Java_com_nexora_ai_NativeLlama_loadProgress(JNIEnv *, jobject) {
     return g_load_progress.load(std::memory_order_relaxed);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_nexora_ai_NativeLlama_contextSize(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    return g_context != nullptr ? g_context_size : 0;
 }
 
 extern "C" JNIEXPORT jintArray JNICALL
@@ -560,9 +566,11 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
     if (!g_last_error.empty()) return -6;
     if (tokens.empty()) { set_error("Prompt tidak menghasilkan token."); return -7; }
 
-    const int32_t requested_tokens = std::max(1, std::min(2048, static_cast<int32_t>(max_tokens)));
-    if (g_position + static_cast<int32_t>(tokens.size()) + requested_tokens > g_context_size) {
-        set_error("Context penuh. Mulai percakapan baru atau kurangi jumlah token/context.");
+    // UI may request up to 100,000 output tokens. The real limit is the
+    // model context remaining after the formatted prompt has been evaluated.
+    const int32_t requested_tokens = std::clamp(static_cast<int32_t>(max_tokens), 1, 100000);
+    if (tokens.size() >= static_cast<size_t>(g_context_size)) {
+        set_error("Prompt melebihi context model. Kurangi panjang pesan atau gunakan context yang lebih besar.");
         return -8;
     }
     if (!decode_tokens_locked(tokens)) {
@@ -571,13 +579,22 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
         return -9;
     }
 
+    const int32_t available_tokens = std::max(0, g_context_size - g_position - 1);
+    const int32_t effective_tokens = std::min(requested_tokens, available_tokens);
+    if (effective_tokens <= 0) {
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        set_error("Tidak ada ruang context tersisa untuk menghasilkan token. Mulai chat baru atau pilih context yang lebih besar.");
+        return -10;
+    }
+
     llama_sampler_reset(g_sampler);
     g_pending_user = user;
     g_pending_response.clear();
     g_utf8_pending.clear();
-    g_remaining_tokens = requested_tokens;
+    g_remaining_tokens = effective_tokens;
     g_generated_tokens.store(0, std::memory_order_relaxed);
-    g_generation_limit.store(requested_tokens, std::memory_order_relaxed);
+    g_generation_limit.store(effective_tokens, std::memory_order_relaxed);
     g_inference_phase.store(2, std::memory_order_relaxed);
     g_generation_active = true;
     return 0;

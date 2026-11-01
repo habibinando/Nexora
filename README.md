@@ -9,7 +9,10 @@ Nexora is an Android-native, offline-first GGUF inference app. It does not ship 
 - Keep multiple imported models in a local index; the user explicitly chooses the model to load.
 - Load one model at a time and release it from memory on request.
 - Run local chat and coding prompts through the upstream llama.cpp C API.
-- Stream decoded output token pieces into the chat UI.
+- Stream decoded output token pieces into the chat UI with throttled Compose updates.
+- Configure the requested output limit from 1 to 100,000 tokens; show the effective native limit after accounting for remaining model context.
+- Show live generation status, token count and throughput in a collapsible progress panel; move the completed response into the normal message view.
+- Render fenced code and detect common unfenced source-code responses in Coding mode, with per-block and whole-response copy actions.
 - Display Android ABI, CPU core count, RAM availability and llama.cpp runtime information.
 - Run multimodal image understanding with the upstream llama.cpp MTMD vision encoder when a compatible projector (mmproj) is imported.
 
@@ -27,7 +30,7 @@ The default distributable build targets arm64-v8a and uses llama.cpp's ARM CPU b
 
 The app validates GGUF file signatures, but that does not guarantee every architecture, quantization, context size or model family can run. llama.cpp performs the definitive model load. Split/sharded GGUF imports are rejected. For vision, the user must import the matching mmproj GGUF file for the selected model; the MTMD runtime validates whether it actually supports image input. A random projector file is not assumed compatible. Large models may fail to load or exhaust memory; the app checks available RAM conservatively before native allocation. Only one model is active at a time.
 
-The configured inference context is 2048 tokens, capped to the model's reported trained context. A context-full response asks the user to start a new chat rather than silently discarding conversation history.
+The load-time context target adapts to estimated free-memory headroom (4,096, 8,192, 16,384, or 32,768 tokens) and is capped to the GGUF model's reported trained context. Requested output can be configured up to 100,000 tokens, but the native runtime sets the effective generation limit to the remaining context after prompt evaluation. Therefore, 100,000 is an application setting ceiling, not a promise that every model can emit 100,000 tokens in one turn. The UI reports when the remaining context limits a request; it never silently drops earlier conversation history.
 
 ## Build requirements
 
