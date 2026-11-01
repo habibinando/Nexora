@@ -253,7 +253,7 @@ class MainActivity : ComponentActivity() {
         prefix: String
     ): File {
         val copiedBytes = AtomicLong(0L)
-        val totalBytes = AtomicLong(queryDocumentSize(uri) ?: -1L)
+        val totalBytes = AtomicLong(-1L)
         val copyTask = async(Dispatchers.IO) {
             copyGgufAsset(uri, requestedName, prefix) { copied, total ->
                 copiedBytes.set(copied)
