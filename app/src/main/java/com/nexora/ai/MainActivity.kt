@@ -1,6 +1,6 @@
-private const val MAX_VISION_IMAGE_BYTES = 20 * 1024 * 1024
-
 package com.nexora.ai
+
+private const val MAX_VISION_IMAGE_BYTES = 20 * 1024 * 1024
 
 import android.app.ActivityManager
 import android.content.Context
