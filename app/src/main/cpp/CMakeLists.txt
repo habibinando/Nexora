@@ -37,4 +37,7 @@ FetchContent_MakeAvailable(llama_cpp)
 
 add_library(nexora-inference SHARED nexora_jni.cpp)
 target_compile_options(nexora-inference PRIVATE -O3 -fvisibility=hidden)
+if(NEXORA_ENABLE_VULKAN AND ANDROID)
+    target_compile_definitions(nexora-inference PRIVATE NEXORA_HAS_VULKAN=1)
+endif()
 target_link_libraries(nexora-inference PRIVATE llama ggml android log)

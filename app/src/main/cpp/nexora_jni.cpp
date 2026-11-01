@@ -242,7 +242,11 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     if (path.empty()) { set_error("Path model tidak valid."); return -1; }
     free_model_locked();
     llama_model_params model_params = llama_model_default_params();
-    model_params.n_gpu_layers = 0; // CPU backend in the default APK.
+#if defined(NEXORA_HAS_VULKAN)
+    model_params.n_gpu_layers = -1; // Offload all supported layers when built with Vulkan.
+#else
+    model_params.n_gpu_layers = 0;  // CPU-only in the default distributable APK.
+#endif
     g_model = llama_model_load_from_file(path.c_str(), model_params);
     if (!g_model) {
         set_error("llama.cpp gagal memuat GGUF. Periksa file, arsitektur, dan kapasitas RAM.");
