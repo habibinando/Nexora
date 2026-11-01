@@ -7,6 +7,9 @@ internal object NativeLlama {
     external fun loadModel(path: String, projectorPath: String?, contextSize: Int, threadCount: Int): Int
     external fun loadProgress(): Float
     external fun contextSize(): Int
+    external fun isModelLoaded(): Boolean
+    external fun activePath(): String
+    external fun restoreHistory(systemPrompt: String, roles: Array<String>, contents: Array<String>): Int
     external fun inferenceStats(): IntArray
     external fun runBenchmark(prompt: String, maxTokens: Int): Int
     external fun benchmarkStats(): LongArray

@@ -19,6 +19,7 @@ constexpr int32_t kInferenceBatchCapacity = 256;
 std::mutex g_mutex;
 bool g_backend_initialized = false;
 llama_model *g_model = nullptr;
+std::string g_model_path;
 llama_context *g_context = nullptr;
 mtmd_context *g_mtmd = nullptr;
 llama_sampler *g_sampler = nullptr;
@@ -113,6 +114,7 @@ void free_model_locked() {
     if (g_mtmd) { mtmd_free(g_mtmd); g_mtmd = nullptr; }
     if (g_context) { llama_free(g_context); g_context = nullptr; }
     if (g_model) { llama_model_free(g_model); g_model = nullptr; }
+    g_model_path.clear();
 }
 
 bool valid_utf8(const std::string &value) {
@@ -487,11 +489,93 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     g_position = 0;
     g_history.clear();
     g_thread_count = effective_thread_count;
+    g_model_path = path;
     const int64_t load_duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now() - load_started
     ).count();
     g_last_load_duration_ns.store(load_duration_ns, std::memory_order_relaxed);
     g_load_progress.store(1.0f, std::memory_order_relaxed);
+    return 0;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_nexora_ai_NativeLlama_isModelLoaded(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    return g_model != nullptr && g_context != nullptr ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_nexora_ai_NativeLlama_activePath(JNIEnv *env, jobject) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    return to_java_string(env, g_model_path);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_nexora_ai_NativeLlama_restoreHistory(JNIEnv *env, jobject, jstring system_prompt,
+                                               jobjectArray roles, jobjectArray contents) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    clear_error();
+    if (!g_model || !g_context || !g_sampler) {
+        set_error("Muat model GGUF sebelum memulihkan riwayat.");
+        return -1;
+    }
+    if (g_generation_active) {
+        set_error("Tidak dapat memulihkan riwayat ketika generasi masih aktif.");
+        return -2;
+    }
+    if (system_prompt == nullptr || roles == nullptr || contents == nullptr) {
+        set_error("Data riwayat tidak valid.");
+        return -3;
+    }
+    const jsize role_count = env->GetArrayLength(roles);
+    const jsize content_count = env->GetArrayLength(contents);
+    if (role_count != content_count || role_count > 4096) {
+        set_error("Jumlah pesan riwayat tidak valid.");
+        return -4;
+    }
+
+    const std::string restored_system_prompt = from_java_string(env, system_prompt);
+    std::vector<std::pair<std::string, std::string>> restored_history;
+    restored_history.reserve(static_cast<size_t>(role_count));
+    for (jsize index = 0; index < role_count; ++index) {
+        auto role_value = static_cast<jstring>(env->GetObjectArrayElement(roles, index));
+        auto content_value = static_cast<jstring>(env->GetObjectArrayElement(contents, index));
+        if (role_value == nullptr || content_value == nullptr) {
+            if (role_value != nullptr) env->DeleteLocalRef(role_value);
+            if (content_value != nullptr) env->DeleteLocalRef(content_value);
+            set_error("Pesan riwayat mengandung nilai kosong.");
+            return -5;
+        }
+        const std::string role = from_java_string(env, role_value);
+        const std::string content = from_java_string(env, content_value);
+        env->DeleteLocalRef(role_value);
+        env->DeleteLocalRef(content_value);
+        if (role != "user" && role != "assistant") {
+            set_error("Peran pesan riwayat tidak dikenal.");
+            return -6;
+        }
+        restored_history.emplace_back(role, content);
+    }
+
+    llama_memory_clear(llama_get_memory(g_context), true);
+    g_position = 0;
+    g_kv_cache_tokens.clear();
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+    g_history = std::move(restored_history);
+    g_system_prompt = restored_system_prompt;
+    g_pending_user.clear();
+    g_pending_response.clear();
+    g_utf8_pending.clear();
+    g_remaining_tokens = 0;
+    g_cancel_requested.store(false, std::memory_order_relaxed);
+    g_generation_cancelled.store(false, std::memory_order_relaxed);
+    g_generation_active = false;
+    g_prompt_processed.store(0, std::memory_order_relaxed);
+    g_prompt_total.store(0, std::memory_order_relaxed);
+    g_generated_tokens.store(0, std::memory_order_relaxed);
+    g_generation_limit.store(0, std::memory_order_relaxed);
+    llama_sampler_reset(g_sampler);
+    g_inference_phase.store(0, std::memory_order_relaxed);
     return 0;
 }
 

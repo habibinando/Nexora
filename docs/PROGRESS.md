@@ -223,7 +223,18 @@ Riwayat scope awal dipertahankan sebagai catatan historis; pekerjaan selanjutnya
 
 ## Fase 1 — K4: StateFlow ViewModel dan lifecycle
 
-- K4 menjadi pekerjaan aktif berikutnya setelah K3 sukses pada CI.
-- Target: memindahkan UI state dari `MainActivity` ke `NexoraViewModel`, mempertahankan Activity Result launcher di Activity, dan memisahkan operasi storage/runtime dari rendering Compose.
-- State chat akan disimpan secara lokal dan atomik; pemulihan history native harus dijaga agar pesan yang tampil sama dengan konteks yang dipakai model saat melanjutkan percakapan.
-- Tidak boleh mengklaim percakapan pulih penuh setelah process death sebelum native history direkonstruksi dan diuji. Model GGUF yang ada di RAM tidak bertahan setelah proses Android dibunuh.
+### Implementasi
+- Kepemilikan state UI dipindah ke `NexoraViewModel`; `MainActivity` menjadi host Activity Result dan penghubung operasi Android.
+- Scalar state dipancarkan lewat `StateFlow<NexoraUiState>`; daftar model/pesan dimiliki ViewModel sebagai snapshot state list yang reaktif untuk Compose.
+- `rememberSaveable` digunakan untuk input chat, input batas output, dan pertanyaan vision.
+- Atribut `configChanges` yang menghambat Activity recreation otomatis dihapus.
+- JNI menyediakan `isModelLoaded()`, `activePath()`, dan `restoreHistory()`; Activity mencocokkan path model native dengan indeks model setelah dibuat ulang.
+- Riwayat chat disimpan ke JSON app-private melalui file sementara, `fsync`, dan atomic replace. Riwayat diikat ke ID model dan mode chat.
+- Ketika model yang sama dimuat kembali, role/content dipulihkan ke native history. KV cache dibangun ulang secara lazy pada giliran berikutnya; riwayat model berbeda tidak dicampur.
+- Unload biasa mempertahankan riwayat lokal; penghapusan model aktif menghapus riwayat yang terikat padanya.
+- `onCleared()` meminta Stop, menyelesaikan panggilan native, lalu unload/shutdown llama.cpp pada thread cleanup terpisah.
+
+### Batas verifikasi
+- CI K4 dan pemulihan proses perlu diverifikasi sebelum fase dinyatakan selesai.
+- Process death tetap menghilangkan bobot model dari RAM; GGUF perlu dimuat ulang. JSON memulihkan transcript dan system prompt, bukan KV cache.
+- Smoke test recovery pada perangkat belum dilakukan untuk perubahan ini.

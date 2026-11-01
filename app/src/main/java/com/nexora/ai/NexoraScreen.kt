@@ -33,6 +33,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -288,9 +289,9 @@ private fun ChatPage(
     onSendMessage: (String) -> Unit,
     onNewChat: () -> Unit
 ) {
-    var input by remember { mutableStateOf("") }
+    var input by rememberSaveable { mutableStateOf("") }
     var showGenerationSettings by remember { mutableStateOf(false) }
-    var maxTokensInput by remember(maxOutputTokens) { mutableStateOf(maxOutputTokens.toString()) }
+    var maxTokensInput by rememberSaveable(maxOutputTokens) { mutableStateOf(maxOutputTokens.toString()) }
     Column(Modifier.fillMaxSize()) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             ChatMode.entries.forEach { mode ->
@@ -752,7 +753,7 @@ private fun VisionPage(
     onPickImage: () -> Unit,
     onAnalyze: (String) -> Unit
 ) {
-    var question by remember { mutableStateOf("Jelaskan isi gambar ini secara detail.") }
+    var question by rememberSaveable { mutableStateOf("Jelaskan isi gambar ini secara detail.") }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)

@@ -10,10 +10,9 @@ import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -47,29 +46,73 @@ internal enum class ChatMode(val label: String) { CHAT("Chat"), CODING("Coding")
 internal enum class AppPage(val label: String) { CHAT("Chat"), MODELS("Models"), HARDWARE("Hardware"), VISION("Vision") }
 
 class MainActivity : ComponentActivity() {
-    private val models = mutableStateListOf<LocalModel>()
-    private val messages = mutableStateListOf<ChatMessage>()
+    private val viewModel: NexoraViewModel by lazy(LazyThreadSafetyMode.NONE) {
+        ViewModelProvider(this)[NexoraViewModel::class.java]
+    }
+    private val models get() = viewModel.models
+    private val messages get() = viewModel.messages
 
-    private var activeModelId by mutableStateOf<String?>(null)
-    private var page by mutableStateOf(AppPage.CHAT)
-    private var chatMode by mutableStateOf(ChatMode.CHAT)
-    private var engineReady by mutableStateOf(false)
-    private var isBusy by mutableStateOf(false)
-    private var canStopGeneration by mutableStateOf(false)
-    private var busyLabel by mutableStateOf("")
-    private var busyProgress by mutableStateOf(-1f)
-    private var progressDetail by mutableStateOf("")
-    private var benchmarkResult by mutableStateOf("")
-    private var maxOutputTokens by mutableStateOf(4096)
-    private var generationPreview by mutableStateOf("")
-    private var statusText by mutableStateOf("Menyiapkan runtime lokal…")
-    private var systemInfo by mutableStateOf("Backend belum diinisialisasi.")
-    private var hardwareInfo by mutableStateOf("Memeriksa perangkat…")
-    private var errorText by mutableStateOf<String?>(null)
-    private var visionSupported by mutableStateOf(false)
-    private var visionImageName by mutableStateOf<String?>(null)
-    private var visionImageBytes by mutableStateOf<ByteArray?>(null)
-    private var visionResult by mutableStateOf("")
+    private var activeModelId: String?
+        get() = viewModel.uiState.value.activeModelId
+        set(value) = viewModel.updateState { copy(activeModelId = value) }
+    private var page: AppPage
+        get() = viewModel.uiState.value.page
+        set(value) = viewModel.updateState { copy(page = value) }
+    private var chatMode: ChatMode
+        get() = viewModel.uiState.value.chatMode
+        set(value) = viewModel.updateState { copy(chatMode = value) }
+    private var engineReady: Boolean
+        get() = viewModel.uiState.value.engineReady
+        set(value) = viewModel.updateState { copy(engineReady = value) }
+    private var isBusy: Boolean
+        get() = viewModel.uiState.value.isBusy
+        set(value) = viewModel.updateState { copy(isBusy = value) }
+    private var canStopGeneration: Boolean
+        get() = viewModel.uiState.value.canStopGeneration
+        set(value) = viewModel.updateState { copy(canStopGeneration = value) }
+    private var busyLabel: String
+        get() = viewModel.uiState.value.busyLabel
+        set(value) = viewModel.updateState { copy(busyLabel = value) }
+    private var busyProgress: Float
+        get() = viewModel.uiState.value.busyProgress
+        set(value) = viewModel.updateState { copy(busyProgress = value) }
+    private var progressDetail: String
+        get() = viewModel.uiState.value.progressDetail
+        set(value) = viewModel.updateState { copy(progressDetail = value) }
+    private var benchmarkResult: String
+        get() = viewModel.uiState.value.benchmarkResult
+        set(value) = viewModel.updateState { copy(benchmarkResult = value) }
+    private var maxOutputTokens: Int
+        get() = viewModel.uiState.value.maxOutputTokens
+        set(value) = viewModel.updateState { copy(maxOutputTokens = value) }
+    private var generationPreview: String
+        get() = viewModel.uiState.value.generationPreview
+        set(value) = viewModel.updateState { copy(generationPreview = value) }
+    private var statusText: String
+        get() = viewModel.uiState.value.statusText
+        set(value) = viewModel.updateState { copy(statusText = value) }
+    private var systemInfo: String
+        get() = viewModel.uiState.value.systemInfo
+        set(value) = viewModel.updateState { copy(systemInfo = value) }
+    private var hardwareInfo: String
+        get() = viewModel.uiState.value.hardwareInfo
+        set(value) = viewModel.updateState { copy(hardwareInfo = value) }
+    private var errorText: String?
+        get() = viewModel.uiState.value.errorText
+        set(value) = viewModel.updateState { copy(errorText = value) }
+    private var visionSupported: Boolean
+        get() = viewModel.uiState.value.visionSupported
+        set(value) = viewModel.updateState { copy(visionSupported = value) }
+    private var visionImageName: String?
+        get() = viewModel.uiState.value.visionImageName
+        set(value) = viewModel.updateState { copy(visionImageName = value) }
+    private var visionImageBytes: ByteArray?
+        get() = viewModel.uiState.value.visionImageBytes
+        set(value) = viewModel.updateState { copy(visionImageBytes = value) }
+    private var visionResult: String
+        get() = viewModel.uiState.value.visionResult
+        set(value) = viewModel.updateState { copy(visionResult = value) }
+
     private var pendingProjectorModelId: String? = null
 
     private val importModelLauncher =
@@ -95,28 +138,29 @@ class MainActivity : ComponentActivity() {
             .getInt("max_output_tokens", 4096).coerceIn(1, 100000)
 
         setContent {
+            val uiState by viewModel.uiState.collectAsState()
             NexoraTheme {
                 NexoraScreen(
                     models = models,
-                    activeModelId = activeModelId,
-                    currentPage = page,
-                    chatMode = chatMode,
+                    activeModelId = uiState.activeModelId,
+                    currentPage = uiState.page,
+                    chatMode = uiState.chatMode,
                     messages = messages,
-                    engineReady = engineReady,
-                    isBusy = isBusy,
-                    canStopGeneration = canStopGeneration,
+                    engineReady = uiState.engineReady,
+                    isBusy = uiState.isBusy,
+                    canStopGeneration = uiState.canStopGeneration,
                     onStopGeneration = ::stopGeneration,
-                    busyLabel = busyLabel,
-                    busyProgress = busyProgress,
-                    progressDetail = progressDetail,
-                    generationPreview = generationPreview,
-                    maxOutputTokens = maxOutputTokens,
+                    busyLabel = uiState.busyLabel,
+                    busyProgress = uiState.busyProgress,
+                    progressDetail = uiState.progressDetail,
+                    generationPreview = uiState.generationPreview,
+                    maxOutputTokens = uiState.maxOutputTokens,
                     onMaxOutputTokensChange = ::updateMaxOutputTokens,
-                    statusText = statusText,
-                    errorText = errorText,
-                    systemInfo = systemInfo,
-                    hardwareInfo = hardwareInfo,
-                    benchmarkResult = benchmarkResult,
+                    statusText = uiState.statusText,
+                    errorText = uiState.errorText,
+                    systemInfo = uiState.systemInfo,
+                    hardwareInfo = uiState.hardwareInfo,
+                    benchmarkResult = uiState.benchmarkResult,
                     onRunBenchmark = ::runHardwareBenchmark,
                     onPageSelected = { page = it },
                     onModeSelected = ::changeMode,
@@ -125,10 +169,10 @@ class MainActivity : ComponentActivity() {
                     onUnloadModel = ::unloadModel,
                     onRemoveModel = ::removeModel,
                     onImportProjector = ::launchProjectorPicker,
-                    visionReady = visionSupported,
-                    visionImageName = visionImageName,
-                    visionResult = visionResult,
-                    isVisionImageSelected = visionImageBytes != null,
+                    visionReady = uiState.visionSupported,
+                    visionImageName = uiState.visionImageName,
+                    visionResult = uiState.visionResult,
+                    isVisionImageSelected = uiState.visionImageBytes != null,
                     onPickVisionImage = ::launchVisionImagePicker,
                     onAnalyzeVision = ::analyzeVisionImage,
                     onSendMessage = ::sendMessage,
@@ -144,10 +188,31 @@ class MainActivity : ComponentActivity() {
                     NativeLlama.initialize(applicationInfo.nativeLibraryDir)
                 }.ifBlank { "llama.cpp aktif." }
                 engineReady = true
-                statusText = if (models.isEmpty()) {
-                    "Runtime siap. Impor model GGUF untuk memulai."
+
+                val nativeModelLoaded = withContext(Dispatchers.IO) { NativeLlama.isModelLoaded() }
+                if (nativeModelLoaded) {
+                    val nativePath = withContext(Dispatchers.IO) { NativeLlama.activePath() }
+                    val restoredModel = models.firstOrNull {
+                        File(it.path).absolutePath == File(nativePath).absolutePath
+                    }
+                    if (restoredModel != null) {
+                        activeModelId = restoredModel.id
+                        visionSupported = withContext(Dispatchers.IO) { NativeLlama.hasVision() }
+                        synchronizeNativeConversation(restoredModel.id)
+                        val contextSize = withContext(Dispatchers.IO) { NativeLlama.contextSize() }
+                        statusText = "Model aktif: ${restoredModel.name} · Context ${contextSize} token"
+                    } else {
+                        withContext(Dispatchers.IO) { NativeLlama.unload() }
+                        activeModelId = null
+                        statusText = "Runtime siap. Model aktif sebelumnya tidak lagi terdaftar."
+                    }
                 } else {
-                    "Runtime siap. Pilih model yang ingin dimuat."
+                    activeModelId = null
+                    statusText = if (models.isEmpty()) {
+                        "Runtime siap. Impor model GGUF untuk memulai."
+                    } else {
+                        "Runtime siap. Pilih model yang ingin dimuat."
+                    }
                 }
             } catch (error: Throwable) {
                 engineReady = false
@@ -368,14 +433,16 @@ class MainActivity : ComponentActivity() {
                 visionSupported = withContext(Dispatchers.IO) { NativeLlama.hasVision() }
                 visionImageBytes = null
                 visionImageName = null
-                messages.clear()
+                synchronizeNativeConversation(model.id)
                 visionResult = ""
                 statusText = buildString {
                     append("Model aktif: ${model.name} · Context ${activeContextSize.coerceAtLeast(0)} token")
                     if (visionSupported) append(" · Vision siap")
                 }
             } catch (error: Throwable) {
+                withContext(Dispatchers.IO) { NativeLlama.unload() }
                 activeModelId = null
+                visionSupported = false
                 errorText = error.message ?: "Gagal memuat model."
             } finally {
                 isBusy = false
@@ -396,9 +463,10 @@ class MainActivity : ComponentActivity() {
                 activeModelId = null
                 benchmarkResult = ""
                 visionSupported = false
-                messages.clear()
+                visionImageBytes = null
+                visionImageName = null
                 visionResult = ""
-                statusText = "Model dilepas dari RAM."
+                statusText = "Model dilepas dari RAM. Riwayat lokal tetap tersimpan."
             } catch (error: Throwable) {
                 errorText = error.message ?: "Gagal melepas model."
             } finally {
@@ -417,7 +485,7 @@ class MainActivity : ComponentActivity() {
                     withContext(Dispatchers.IO) { NativeLlama.unload() }
                     activeModelId = null
                     visionSupported = false
-                    messages.clear()
+                    viewModel.clearConversation(null, chatMode)
                 }
                 withContext(Dispatchers.IO) {
                     File(model.path).delete()
@@ -464,7 +532,6 @@ class MainActivity : ComponentActivity() {
                     withContext(Dispatchers.IO) { NativeLlama.unload() }
                     activeModelId = null
                     visionSupported = false
-                    messages.clear()
                     reload = updated
                 }
                 statusText = "Projector tersimpan. Model harus dimuat ulang untuk mengaktifkan vision."
@@ -828,13 +895,13 @@ class MainActivity : ComponentActivity() {
     private fun changeMode(newMode: ChatMode) {
         if (isBusy || newMode == chatMode) return
         chatMode = newMode
-        messages.clear()
+        viewModel.clearConversation(activeModelId, chatMode)
         resetNativeConversation("Menyiapkan mode ${newMode.label}…")
     }
 
     private fun newChat() {
         if (isBusy) return
-        messages.clear()
+        viewModel.clearConversation(activeModelId, chatMode)
         visionResult = ""
         resetNativeConversation("Membuat percakapan baru…")
     }
@@ -859,6 +926,34 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun systemPromptForMode(mode: ChatMode): String = when (mode) {
+        ChatMode.CHAT ->
+            "You are Nexora, a precise and helpful on-device AI assistant. " +
+                "Answer in the user's language. Never claim to use tools or data you do not have."
+        ChatMode.CODING ->
+            "You are Nexora Code, a senior software engineer. " +
+                "Produce complete, correct, maintainable, modern code. Preserve all required imports and supporting functions. " +
+                "Do not stop mid-file; if the model context prevents completion, state exactly what remains. " +
+                "Explain assumptions and never fabricate test results."
+    }
+
+    private suspend fun synchronizeNativeConversation(modelId: String) {
+        val hasMatchingHistory = viewModel.hasConversationForModel(modelId)
+        val history = if (hasMatchingHistory) messages.toList() else emptyList()
+        val result = withContext(Dispatchers.IO) {
+            NativeLlama.restoreHistory(
+                systemPromptForMode(chatMode),
+                history.map { it.role }.toTypedArray(),
+                history.map { it.content }.toTypedArray()
+            )
+        }
+        if (result != 0) {
+            val detail = withContext(Dispatchers.IO) { NativeLlama.lastError() }
+            error("Gagal menyinkronkan riwayat native (kode $result). $detail")
+        }
+        if (!hasMatchingHistory) viewModel.clearConversation(modelId, chatMode)
+    }
+
     private fun updateMaxOutputTokens(value: Int) {
         val safeValue = value.coerceIn(1, 100000)
         maxOutputTokens = safeValue
@@ -875,7 +970,7 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        messages.add(ChatMessage("user", trimmed))
+        viewModel.appendMessage(activeModelId, chatMode, ChatMessage("user", trimmed))
         generationPreview = ""
         isBusy = true
         busyLabel = "Menyiapkan prompt…"
@@ -960,7 +1055,7 @@ class MainActivity : ComponentActivity() {
                     generationError.isNotBlank() -> "Generasi berhenti: $generationError"
                     else -> "Model tidak menghasilkan teks untuk prompt ini."
                 }
-                messages.add(ChatMessage("assistant", finalContent))
+                viewModel.appendMessage(activeModelId, chatMode, ChatMessage("assistant", finalContent))
                 generationPreview = ""
                 if (generationError.isNotBlank() && !wasCancelled) errorText = generationError
                 busyProgress = if (wasCancelled) 0f else 1f
@@ -980,12 +1075,12 @@ class MainActivity : ComponentActivity() {
                 }
                 if (wasCancelled) {
                     if (messages.lastOrNull()?.role == "user") {
-                        messages.add(ChatMessage("assistant", getString(R.string.generation_stopped_no_output)))
+                        viewModel.appendMessage(activeModelId, chatMode, ChatMessage("assistant", getString(R.string.generation_stopped_no_output)))
                     }
                     statusText = getString(R.string.generation_stopped)
                 } else {
                     if (messages.lastOrNull()?.role == "user") {
-                        messages.add(ChatMessage("assistant", "Generasi gagal. Periksa pesan kesalahan."))
+                        viewModel.appendMessage(activeModelId, chatMode, ChatMessage("assistant", "Generasi gagal. Periksa pesan kesalahan."))
                     }
                     errorText = error.message ?: "Inference gagal."
                 }
