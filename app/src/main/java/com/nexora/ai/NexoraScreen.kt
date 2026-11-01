@@ -144,8 +144,18 @@ internal fun NexoraScreen(
                         onNewChat = onNewChat
                     )
                     AppPage.MODELS -> ModelsPage(
-                        models, activeModelId, engineReady, isBusy, busyLabel,
-                        onImportModel, onLoadModel, onUnloadModel, onRemoveModel, onImportProjector
+                        models = models,
+                        activeModelId = activeModelId,
+                        engineReady = engineReady,
+                        isBusy = isBusy,
+                        busyLabel = busyLabel,
+                        busyProgress = busyProgress,
+                        progressDetail = progressDetail,
+                        onImportModel = onImportModel,
+                        onLoadModel = onLoadModel,
+                        onUnloadModel = onUnloadModel,
+                        onRemoveModel = onRemoveModel,
+                        onImportProjector = onImportProjector
                     )
                     AppPage.HARDWARE -> HardwarePage(hardwareInfo, systemInfo)
                     AppPage.VISION -> VisionPage(
@@ -563,6 +573,8 @@ private fun ModelsPage(
     engineReady: Boolean,
     isBusy: Boolean,
     busyLabel: String,
+    busyProgress: Float,
+    progressDetail: String,
     onImportModel: () -> Unit,
     onLoadModel: (LocalModel) -> Unit,
     onUnloadModel: () -> Unit,
@@ -575,6 +587,28 @@ private fun ModelsPage(
         Spacer(Modifier.height(12.dp))
         Button(onClick = onImportModel, enabled = engineReady && !isBusy, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
             Text("＋  Impor Model GGUF")
+        }
+        if (isBusy && busyLabel.isNotBlank()) {
+            Card(
+                Modifier.fillMaxWidth().padding(top = 10.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(busyLabel, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    if (busyProgress >= 0f) {
+                        LinearProgressIndicator(
+                            progress = { busyProgress.coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                    if (progressDetail.isNotBlank()) {
+                        Text(progressDetail, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
+                    }
+                }
+            }
         }
         if (activeModelId != null) {
             TextButton(onClick = onUnloadModel, enabled = !isBusy) { Text("Lepas model aktif dari RAM") }
