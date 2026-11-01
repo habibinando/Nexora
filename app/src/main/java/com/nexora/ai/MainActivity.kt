@@ -705,12 +705,36 @@ class MainActivity : ComponentActivity() {
                     error("Prompt ditolak (kode $result). $detail")
                 }
 
-                val output = StringBuilder()
-                while (true) {
-                    val token = withContext(Dispatchers.IO) { NativeLlama.nextToken() } ?: break
-                    output.append(token)
-                    generationPreview = output.toString()
-                    updateInferenceProgress(NativeLlama.inferenceStats(), startedAt, "Menghasilkan jawaban")
+                val outputText = withContext(Dispatchers.IO) {
+                    val output = StringBuilder()
+                    var lastUiUpdate = SystemClock.elapsedRealtime()
+                    var processedTokens = 0
+
+                    while (true) {
+                        val token = NativeLlama.nextToken() ?: break
+                        output.append(token)
+                        processedTokens++
+
+                        val now = SystemClock.elapsedRealtime()
+                        if (processedTokens % 16 == 0 || now - lastUiUpdate >= 150L) {
+                            val preview = output.takeLast(2000).toString()
+                            val stats = NativeLlama.inferenceStats()
+                            withContext(Dispatchers.Main) {
+                                generationPreview = preview
+                                updateInferenceProgress(stats, startedAt, "Menghasilkan jawaban")
+                            }
+                            lastUiUpdate = now
+                        }
+                    }
+
+                    val complete = output.toString()
+                    val finalPreview = output.takeLast(2000).toString()
+                    val finalTokenStats = NativeLlama.inferenceStats()
+                    withContext(Dispatchers.Main) {
+                        generationPreview = finalPreview
+                        updateInferenceProgress(finalTokenStats, startedAt, "Menyelesaikan jawaban")
+                    }
+                    complete
                 }
 
                 val generationError = withContext(Dispatchers.IO) { NativeLlama.lastError() }
@@ -718,7 +742,7 @@ class MainActivity : ComponentActivity() {
                 val producedTokens = finalStats.getOrNull(3) ?: 0
                 val effectiveLimit = finalStats.getOrNull(4) ?: maxOutputTokens
                 val finalContent = when {
-                    output.isNotEmpty() -> output.toString()
+                    outputText.isNotEmpty() -> outputText
                     generationError.isNotBlank() -> "Generasi berhenti: $generationError"
                     else -> "Model tidak menghasilkan teks untuk prompt ini."
                 }
