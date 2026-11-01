@@ -413,9 +413,9 @@ private fun looksLikeSourceCode(content: String): Boolean {
         line.startsWith("}") || line.startsWith(")") || line.endsWith("{") ||
             line.endsWith(";") || line.contains(" = ") || line.startsWith("return ")
     }
-    val hasQuotedListAssignment = Regex("""(?m)^\\s*[A-Z_][A-Z0-9_]*\\s*=\\s*\\[""")
+    val hasQuotedListAssignment = Regex("""(?m)^\s*[A-Z_][A-Z0-9_]*\s*=\s*\[""")
         .containsMatchIn(content)
-    val quotedListItems = lines.count { it.startsWith("\\\"") || it.startsWith("'") }
+    val quotedListItems = lines.count { it.startsWith("\"") || it.startsWith("'") }
     return declarationCount >= 2 ||
         (declarationCount >= 1 && structuralCount >= 3) ||
         (hasQuotedListAssignment && quotedListItems >= 2)
