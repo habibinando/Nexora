@@ -1,31 +1,31 @@
-*.iml
-.gradle
-.kotlin
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-build/
+# Gradle / Android outputs
+.gradle/
 **/build/
-/captures
-.externalNativeBuild
-.cxx
 local.properties
-.env
-debug.keystore
-*.apk
-.build-outputs/
+.idea/
+*.iml
 
-# Secrets and signing material (never commit)
-.env.*
-!.env.example
+# Native build outputs
+.externalNativeBuild/
+.cxx/
+.cmake/
+*.so
+*.a
+*.o
+
+# User-imported model weights and datasets
+*.gguf
+*.ggml
+*.bin
+*.safetensors
+models/
+checkpoints/
+datasets/
+
+# Local signing material / secrets
 *.jks
 *.keystore
-!debug.keystore.base64
-*.p12
-keystore.properties
-google-services.json
+*.pem
+*.env
+.env.*
+!*.env.example

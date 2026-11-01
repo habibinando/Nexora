@@ -1,118 +1,94 @@
-name: Build Android APK (Nexora)
+name: Nexora Android - Build and Verify
 
 on:
   push:
-    branches:
-      - main
-      - master
-    tags:
-      - 'v*'
+    branches: [main, master]
   pull_request:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nexora-android-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: Build Debug APK with Native NDK
+    name: Build ARM64 APK and run tests
     runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v7
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
-          java-version: '21'
-          distribution: 'temurin'
-          cache: 'gradle'
+          distribution: temurin
+          java-version: "21"
 
-      - name: Setup Android SDK PATH, Accept Licenses & Install NDK / CMake
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Configure Android SDK tools
         run: |
-          ANDROID_SDK_PATH="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
-          if [ -z "$ANDROID_SDK_PATH" ] || [ ! -d "$ANDROID_SDK_PATH" ]; then
-            ANDROID_SDK_PATH="/usr/local/lib/android/sdk"
-          fi
-          SDKMANAGER="$ANDROID_SDK_PATH/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -f "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$ANDROID_SDK_PATH/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -n 1)"
-          fi
-          echo "Found sdkmanager: $SDKMANAGER"
-          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
-          echo "$ANDROID_SDK_PATH/platform-tools" >> "$GITHUB_PATH"
-          yes | "$SDKMANAGER" --licenses || true
-          "$SDKMANAGER" "cmake;3.22.1" "ndk;27.2.12479018"
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
 
-      - name: Make Gradle Wrapper Executable
+      - name: Install Android SDK, NDK and CMake
         run: |
-          if [ -f gradlew ]; then
-            chmod +x gradlew
-          else
-            gradle wrapper
-            chmod +x gradlew
-          fi
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;29.0.13113456" \
+            "cmake;3.31.6"
 
-      - name: Restore Debug Keystore & Google Services Configuration
+      - name: Verify wrapper and toolchain
         run: |
-          if [ -f debug.keystore.base64 ]; then
-            echo "Decoding debug.keystore from debug.keystore.base64..."
-            base64 -d debug.keystore.base64 > debug.keystore
-          elif [ ! -f debug.keystore ]; then
-            echo "Generating fallback debug.keystore..."
-            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-          fi
-          ls -lh debug.keystore
+          chmod +x ./gradlew
+          ./gradlew --version
+          test -d "$ANDROID_HOME/platforms/android-36"
+          test -d "$ANDROID_HOME/ndk/29.0.13113456"
+          test -d "$ANDROID_HOME/cmake/3.31.6"
 
-          if [ ! -f app/google-services.json ]; then
-            echo "Generating fallback app/google-services.json..."
-            cat << 'EOF' > app/google-services.json
-          {
-            "project_info": {
-              "project_number": "139731441168",
-              "project_id": "nexora-ondevice",
-              "storage_bucket": "nexora-ondevice.appspot.com"
-            },
-            "client": [
-              {
-                "client_info": {
-                  "mobilesdk_app_id": "1:139731441168:android:820468a2bf6f52e391b1a0",
-                  "android_client_info": {
-                    "package_name": "com.aistudio.neuralai.vkzqmr"
-                  }
-                },
-                "oauth_client": [],
-                "api_key": [
-                  {
-                    "current_key": "dummy_client_key_for_offline_local_build"
-                  }
-                ],
-                "services": {
-                  "appinvite_service": {
-                    "other_platform_oauth_client": []
-                  }
-                }
-              }
-            ],
-            "configuration_version": "1"
-          }
-          EOF
-          fi
+      - name: Run unit tests and build APK
+        run: ./gradlew clean testDebugUnitTest assembleDebug --no-daemon --stacktrace
 
-      - name: Build Debug APK with Gradle
+      - name: Verify APK output
         run: |
-          ./gradlew assembleDebug --no-daemon --stacktrace -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m -Djava.awt.headless=true"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          file "$APK"
+          mkdir -p release
+          cp "$APK" release/Nexora-ARM64.apk
+          file release/Nexora-ARM64.apk
+          sha256sum release/Nexora-ARM64.apk
+          unzip -l "$APK" | grep -E 'lib/arm64-v8a/lib(nexora-inference|llama|mtmd|ggml)'
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libnexora-inference.so'
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libllama.so'
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmtmd.so'
 
-      - name: Prepare APK Output
-        run: |
-          mkdir -p build-artifacts
-          find app/build/outputs/apk -name "*.apk" -exec cp {} build-artifacts/ \;
-          ls -lh build-artifacts/
 
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v7
+      - name: Publish rolling nightly APK
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
         with:
-          name: Nexora-Debug-APK
-          path: build-artifacts/*.apk
-          retention-days: 14
+          tag_name: nightly
+          name: Nexora Nightly
+          body: |
+            APK ARM64 terbaru dari branch main.
+            Model GGUF tidak disertakan. Impor model sendiri setelah memasang aplikasi.
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          files: release/Nexora-ARM64.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

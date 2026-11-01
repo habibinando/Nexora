@@ -1,6 +1,0 @@
-{
-  "name": "Nexora",
-  "description": "On-Device Neural Network Studio & AI Chat Lab with Native NDK Acceleration",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
