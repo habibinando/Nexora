@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <mutex>
 #include <sys/resource.h>
+#include <sys/sysinfo.h>
+#include <cmath>
 #include <string>
 #include <utility>
 #include <vector>
@@ -83,6 +85,67 @@ int64_t process_peak_rss_bytes() {
 
 bool native_abort_callback(void *) {
     return g_cancel_requested.load(std::memory_order_relaxed);
+}
+
+struct ContextBudget {
+    int32_t requested = 0;
+    int32_t trained = 0;
+    int32_t selected = 0;
+    uint64_t kv_bytes_f16 = 0;
+    uint64_t kv_bytes_q8 = 0;
+    uint64_t available_bytes = 0;
+    bool metadata_complete = false;
+};
+
+bool read_meta_u64(const char * key, uint64_t & value) {
+    if (!g_model) return false;
+    char buffer[128] = {};
+    const int32_t size = llama_model_meta_val_str(g_model, key, buffer, sizeof(buffer));
+    if (size <= 0) return false;
+    try {
+        value = std::stoull(std::string(buffer, static_cast<size_t>(size)));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+uint64_t available_memory_bytes() {
+    struct sysinfo info {};
+    if (sysinfo(&info) != 0) return 0;
+    return static_cast<uint64_t>(info.freeram) * static_cast<uint64_t>(info.mem_unit);
+}
+
+ContextBudget choose_safe_context(int32_t requested, int32_t trained) {
+    ContextBudget budget;
+    budget.requested = std::clamp(requested, 512, 100000);
+    budget.trained = trained;
+    budget.available_bytes = available_memory_bytes();
+    uint64_t layers = 0, kv_heads = 0, head_dim = 0, key_length = 0, value_length = 0;
+    const bool ok = read_meta_u64("llama.block_count", layers) &&
+                    read_meta_u64("llama.attention.head_count_kv", kv_heads) &&
+                    (read_meta_u64("llama.attention.key_length", key_length) ||
+                     read_meta_u64("llama.embedding_length", head_dim)) &&
+                    (read_meta_u64("llama.attention.value_length", value_length) ||
+                     read_meta_u64("llama.embedding_length", head_dim));
+    if (head_dim == 0) head_dim = key_length;
+    if (value_length == 0) value_length = head_dim;
+    const uint64_t per_token_f16 = layers * kv_heads * (key_length + value_length) * sizeof(float);
+    const uint64_t per_token_q8 = per_token_f16 / 2;
+    budget.kv_bytes_f16 = per_token_f16;
+    budget.kv_bytes_q8 = per_token_q8;
+    budget.metadata_complete = ok && per_token_f16 > 0;
+    const uint64_t headroom = budget.available_bytes > (512ULL << 20)
+        ? budget.available_bytes - (512ULL << 20) : 0;
+    const uint64_t conservative = headroom * 60 / 100;
+    int32_t safe = budget.requested;
+    if (budget.metadata_complete && per_token_f16 > 0 && conservative > 0) {
+        const uint64_t max_tokens = conservative / per_token_f16;
+        safe = std::min<int32_t>(safe, static_cast<int32_t>(std::min<uint64_t>(max_tokens, 100000)));
+    }
+    if (trained > 0) safe = std::min(safe, trained);
+    budget.selected = std::max(512, safe);
+    return budget;
 }
 
 bool model_load_progress_callback(float progress, void *) {
@@ -474,8 +537,8 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
 
     const int32_t requested = std::clamp(static_cast<int32_t>(context_size), 512, 100000);
     const int32_t trained = llama_model_n_ctx_train(g_model);
-    g_context_size = trained > 0 ? std::min(requested, trained) : requested;
-    g_context_size = std::max(512, g_context_size);
+    const ContextBudget budget = choose_safe_context(requested, trained);
+    g_context_size = budget.selected;
 
     llama_context_params params = llama_context_default_params();
     params.n_ctx = static_cast<uint32_t>(g_context_size);
