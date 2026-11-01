@@ -243,6 +243,8 @@ class MainActivity : ComponentActivity() {
                 }
                 activeModelId = model.id
                 visionSupported = withContext(Dispatchers.IO) { NativeLlama.hasVision() }
+                visionImageBytes = null
+                visionImageName = null
                 messages.clear()
                 visionResult = ""
                 statusText = if (visionSupported) {
