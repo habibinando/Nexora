@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item
-        android:width="66dp"
-        android:height="66dp"
-        android:drawable="@drawable/neural_ai_icon_1792104262720"
-        android:gravity="center" />
-</layer-list>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="64"
+    android:viewportHeight="64">
+    <path android:fillColor="#8AB4F8" android:pathData="M13,13h10l18,25V13h10v38H41L23,26v25H13z" />
+    <path android:fillColor="#9CC7D8" android:pathData="M49,9a4,4 0,1 0,0.01 0" />
+</vector>
