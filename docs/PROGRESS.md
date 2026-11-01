@@ -9,8 +9,9 @@
 - Branch pekerjaan: `audit/fase-0-baseline`
 - Commit dasar `main`: `8e329c661f83d2a5023d0d9c73ef7d423938d377`
 - Commit branch sebelum audit koreksi ini: `6c202f0cc18842be78842758fdc76cc0b76d8715`
-- Fase aktif: **Fase 1 — K3 (Stop generation)**
-- B0: instrumentasi tersedia; pengukuran perangkat ARM64 nyata belum tersedia dan tidak diklaim selesai
+- Fase aktif: **Fase 1 — K4 (ViewModel/state lifecycle)**
+- B0: **MEASURED** — sampel benchmark pertama pasca-instrumentasi tersedia dari Infinix X6725C / UMS9230E
+- B0 baseline pra-instrumentasi: tetap tidak tersedia; sampel 2026-11-01 bukan baseline lama
 - K1: **SUCCESS** — CI `41328386105` lulus untuk unit test, debug/release APK, signature, ARM64 libraries, R8 mapping, CMake Release dan native `-O3`
 - K2: **SUCCESS** — CI `41329301158` lulus untuk unit test, debug/release APK, signature, ARM64 libraries, R8 mapping, CMake Release dan native `-O3`
 - K3: implementasi native/UI terintegrasi; menunggu CI gabungan
@@ -105,15 +106,50 @@ Tidak ada penggantian engine atau perubahan pin llama.cpp.
 
 ## Baseline pra-instrumentasi
 
-**Tidak pernah diperoleh.** Tidak ada angka baseline inference lama yang dapat direkonstruksi dari CI atau source. Hasil B0 pertama yang kelak diambil dengan instrumentasi ini harus diberi label sebagai pengukuran pertama pasca-instrumentasi, bukan dibandingkan dengan angka baseline pra-instrumentasi yang tidak ada.
+**Tidak pernah diperoleh.** Tidak ada angka baseline inference lama yang dapat direkonstruksi dari CI atau source. Data perangkat tanggal 2026-11-01 di bawah adalah pengukuran pasca-instrumentasi pertama, bukan baseline pra-instrumentasi. Karena APK/commit yang menghasilkan laporan tersebut tidak dicantumkan pada laporan pengguna, hasil ini tidak diatribusikan ke commit K1/K2/K3 secara spekulatif.
 
-## Verifikasi yang belum dapat dilakukan
+## Pengukuran B0 pertama — perangkat ARM64 nyata (2026-11-01)
 
-- Perintah lokal `./gradlew clean testDebugUnitTest assembleDebug assembleRelease` belum dijalankan pada sesi ini.
-- Lingkungan yang tersedia tidak mempunyai checkout repository, Android SDK/NDK, atau `adb`; hanya JDK 21 terdeteksi.
-- Tidak ada perangkat ARM64 yang terhubung dan tidak ada file GGUF pengguna yang tersedia.
-- Belum ada hasil inference perangkat: prefill tok/s, decode tok/s, load duration, peak RSS, dan jumlah output aktual belum diketahui.
-- Release build belum diverifikasi.
+### Perangkat dan backend
+- Perangkat: Infinix X6725C (laporan pengguna menuliskan Infinix Infinix X6725C)
+- OS: Android 15 / API 35; ABI `arm64-v8a`; 8 CPU cores
+- SoC: `UMS9230E`
+- RAM perangkat: 7,6 GB total; 2,7 GB tersedia saat pemeriksaan perangkat
+- Backend: llama.cpp / arm64-v8a
+- Fitur CPU aktual yang dilaporkan: NEON=1, ARM_FMA=1, FP16_VA=1, DOTPROD=1, KLEIDIAI=1, REPACK=1
+
+### Model dan konfigurasi
+- Model: `Qwen2.5-3B-Instruct-Abliterated.Q4_K_M.gguf`
+- Quantization: Q4_K_M (UI melaporkan Q4_K — Medium)
+- Context aktif: 8.192 token; thread: 6
+- Prompt benchmark: 73 token; target output: 128 token
+- Alasan berhenti: batas output 128 token tercapai; 128/128 token dihasilkan
+
+### Hasil terukur
+| Metrik | Hasil |
+|---|---:|
+| Prefill throughput | **7,01 tok/s** |
+| Prefill duration | 10,41 s |
+| Prompt tokens | 73 |
+| Decode throughput | **3,04 tok/s** |
+| Decode duration | 42,16 s |
+| Output tokens | 128 / 128 |
+| Model load duration | 33,89 s |
+| Process peak RSS | 3,5 GB |
+
+Throughput yang dilaporkan konsisten setelah pembulatan: 73 / 10,41 ≈ 7,01 tok/s dan 128 / 42,16 ≈ 3,04 tok/s.
+
+### Interpretasi dan keterbatasan
+- Ini adalah sampel baseline performa pasca-instrumentasi pertama; jangan menyebutnya baseline pra-instrumentasi.
+- Bottleneck yang tampak dari sampel ini adalah decode (3,04 tok/s), lebih lambat daripada prefill (7,01 tok/s). Ini observasi satu run, bukan kesimpulan universal tentang seluruh model/backend.
+- Peak RSS 3,5 GB adalah high-water mark seluruh proses sejak proses berjalan; tidak boleh dikurangkan dari RAM tersedia 2,7 GB atau dianggap sebagai delta penggunaan model karena keduanya metrik dan waktu sampling yang berbeda.
+- Laporan tidak mencantumkan commit APK, suhu/thermal throttling, kondisi baterai/pengisian, aplikasi latar, atau pengulangan benchmark. Perbandingan optimasi berikutnya perlu memakai model, context, thread, prompt, output limit, dan kondisi termal yang sama, idealnya beberapa run setelah pemanasan.
+
+## Verifikasi perangkat yang masih perlu dilakukan
+
+- Uji Stop saat prefill dan saat decode; verifikasi jawaban parsial tersimpan serta chat berikutnya dapat melanjutkan tanpa state KV yang rusak.
+- Ulangi benchmark minimal tiga kali pada kondisi termal stabil setelah setiap optimasi K2/K3; catat median dan rentang, bukan hanya satu hasil.
+- Catat commit APK yang terpasang beserta suhu/thermal dan status baterai agar hasil dapat diatribusikan.
 - CI runner tidak boleh dipakai sebagai pengganti pengukuran perangkat.
 
 ## Cara mengambil data B0 pada perangkat
@@ -124,11 +160,11 @@ Tidak ada penggantian engine atau perubahan pin llama.cpp.
 4. Simpan seluruh hasil yang ditampilkan: perangkat/SoC/RAM, model/quantization, context/thread, prefill tok/s, decode tok/s, durasi load, peak RSS, jumlah token output aktual, dan alasan berhenti.
 5. Sertakan kondisi perangkat saat pengukuran (suhu/thermal, aplikasi lain, status baterai/pengisian, serta apakah perangkat baru selesai memuat model).
 
-B0 tetap **BLOCKED** sampai pengukuran tersebut berasal dari perangkat Android ARM64 nyata dengan GGUF yang benar-benar dimuat. Jangan mulai K1 atau fase berikutnya sebelum hasil ini tersedia.
+B0 measurement gate **TERPENUHI untuk satu sampel pertama**. B0 belum menjadi benchmark komparatif final karena baseline pra-instrumentasi tidak ada dan belum ada pengulangan terkontrol; optimasi berikutnya wajib dibandingkan dengan kondisi pengujian yang konsisten.
 
 ## Batas scope
 
-Perubahan koreksi ini hanya menyentuh instrumentasi benchmark B0, metadata/penyajian hasil, dan dokumentasi progres. Tidak mengerjakan optimasi prefill/KV cache, stop generation, arsitektur ViewModel, release pipeline, atau fase roadmap berikutnya. Tidak membuat branch baru dan tidak menyentuh repository `Nexora2`.
+Riwayat scope awal dipertahankan sebagai catatan historis; pekerjaan selanjutnya K1–K4 dicatat pada bagian masing-masing di bawah. Tidak membuat branch tambahan dan tidak menyentuh repository `Nexora2`.
 
 
 ## Fase 1 — K1: Release build dan distribusi APK
@@ -181,5 +217,13 @@ Perubahan koreksi ini hanya menyentuh instrumentasi benchmark B0, metadata/penya
 
 ### Verifikasi / batas
 - Header pinned `llama.h` dan callback ggml telah diperiksa; API abort callback memang CPU-only.
-- CI K3 akan memeriksa compile, unit test, pairing JNI dan debug/release APK.
+- CI [41330455361](https://github.com/habibinando/Nexora/actions/runs/41330455361) **SUCCESS**: unit tests, compile JNI/C++, debug + release APK, signing check, ARM64 library checks, R8 mapping, CMake Release flags, dan publikasi APK PR semuanya lulus.
 - Perilaku Stop saat runtime inference tetap memerlukan smoke test dengan GGUF. Build Vulkan tidak mengklaim abort callback di tengah kernel; pembatalan Vulkan dilakukan pada batas decode/token setelah operasi berjalan kembali.
+
+
+## Fase 1 — K4: StateFlow ViewModel dan lifecycle
+
+- K4 menjadi pekerjaan aktif berikutnya setelah K3 sukses pada CI.
+- Target: memindahkan UI state dari `MainActivity` ke `NexoraViewModel`, mempertahankan Activity Result launcher di Activity, dan memisahkan operasi storage/runtime dari rendering Compose.
+- State chat akan disimpan secara lokal dan atomik; pemulihan history native harus dijaga agar pesan yang tampil sama dengan konteks yang dipakai model saat melanjutkan percakapan.
+- Tidak boleh mengklaim percakapan pulih penuh setelah process death sebelum native history direkonstruksi dan diuji. Model GGUF yang ada di RAM tidak bertahan setelah proses Android dibunuh.
