@@ -302,11 +302,14 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
     if (user.empty()) { set_error("Pesan tidak boleh kosong."); return -4; }
 
     if (next_system != g_system_prompt) {
-        llama_memory_clear(llama_get_memory(g_context), true);
-        g_position = 0;
         g_history.clear();
         g_system_prompt = next_system;
     }
+
+    // Chat templates render the complete transcript. Rebuild the KV cache from
+    // that transcript on every turn so previous tokens are never appended twice.
+    llama_memory_clear(llama_get_memory(g_context), true);
+    g_position = 0;
 
     const std::string formatted = format_prompt_locked(user);
     if (formatted.empty()) {
