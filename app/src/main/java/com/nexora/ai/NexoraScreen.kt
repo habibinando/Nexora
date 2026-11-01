@@ -75,6 +75,7 @@ internal fun NexoraScreen(
     onUnloadModel: () -> Unit,
     onRemoveModel: (LocalModel) -> Unit,
     onSendMessage: (String) -> Unit,
+    onNewChat: () -> Unit,
     onDismissError: () -> Unit
 ) {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -100,7 +101,7 @@ internal fun NexoraScreen(
 
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when (currentPage) {
-                    AppPage.CHAT -> ChatPage(messages, activeModelId, models, chatMode, isBusy, onModeSelected, onSendMessage)
+                    AppPage.CHAT -> ChatPage(messages, activeModelId, models, chatMode, isBusy, onModeSelected, onSendMessage, onNewChat)
                     AppPage.MODELS -> ModelsPage(models, activeModelId, engineReady, isBusy, busyLabel, onImportModel, onLoadModel, onUnloadModel, onRemoveModel)
                     AppPage.HARDWARE -> HardwarePage(hardwareInfo, systemInfo)
                     AppPage.VISION -> VisionPage()
@@ -160,7 +161,8 @@ private fun ChatPage(
     chatMode: ChatMode,
     isBusy: Boolean,
     onModeSelected: (ChatMode) -> Unit,
-    onSendMessage: (String) -> Unit
+    onSendMessage: (String) -> Unit,
+    onNewChat: () -> Unit
 ) {
     var input by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize()) {
@@ -176,6 +178,7 @@ private fun ChatPage(
                     shape = RoundedCornerShape(12.dp)
                 ) { Text(mode.label, fontSize = 12.sp) }
             }
+            TextButton(onClick = onNewChat, enabled = !isBusy) { Text("Baru") }
         }
         Spacer(Modifier.height(12.dp))
 

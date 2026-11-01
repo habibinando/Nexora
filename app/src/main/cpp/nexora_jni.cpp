@@ -149,7 +149,72 @@ void finish_generation_locked() {
     g_generation_active = false;
 }
 
-jstring to_java_string(JNIEnv *env, const std::string &value) { return env->NewStringUTF(value.c_str()); }
+std::string from_java_string(JNIEnv *env, jstring value) {
+    if (value == nullptr) return {};
+    const jsize length = env->GetStringLength(value);
+    const jchar *chars = env->GetStringChars(value, nullptr);
+    if (chars == nullptr) return {};
+    std::string output;
+    output.reserve(static_cast<size_t>(length) * 3);
+    for (jsize i = 0; i < length; ++i) {
+        uint32_t codepoint = chars[i];
+        if (codepoint >= 0xd800 && codepoint <= 0xdbff && i + 1 < length &&
+            chars[i + 1] >= 0xdc00 && chars[i + 1] <= 0xdfff) {
+            codepoint = 0x10000 + ((codepoint - 0xd800) << 10) + (chars[++i] - 0xdc00);
+        } else if (codepoint >= 0xd800 && codepoint <= 0xdfff) {
+            codepoint = 0xfffd;
+        }
+        if (codepoint <= 0x7f) {
+            output.push_back(static_cast<char>(codepoint));
+        } else if (codepoint <= 0x7ff) {
+            output.push_back(static_cast<char>(0xc0 | (codepoint >> 6)));
+            output.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+        } else if (codepoint <= 0xffff) {
+            output.push_back(static_cast<char>(0xe0 | (codepoint >> 12)));
+            output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+            output.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+        } else {
+            output.push_back(static_cast<char>(0xf0 | (codepoint >> 18)));
+            output.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3f)));
+            output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+            output.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+        }
+    }
+    env->ReleaseStringChars(value, chars);
+    return output;
+}
+
+jstring to_java_string(JNIEnv *env, const std::string &value) {
+    std::vector<jchar> output;
+    output.reserve(value.size());
+    const auto *bytes = reinterpret_cast<const unsigned char *>(value.data());
+    size_t i = 0;
+    while (i < value.size()) {
+        const unsigned char c = bytes[i++];
+        uint32_t codepoint = 0xfffd;
+        if (c <= 0x7f) {
+            codepoint = c;
+        } else if ((c & 0xe0) == 0xc0 && i < value.size()) {
+            codepoint = ((c & 0x1f) << 6) | (bytes[i++] & 0x3f);
+        } else if ((c & 0xf0) == 0xe0 && i + 1 < value.size()) {
+            codepoint = ((c & 0x0f) << 12) | ((bytes[i] & 0x3f) << 6) | (bytes[i + 1] & 0x3f);
+            i += 2;
+        } else if ((c & 0xf8) == 0xf0 && i + 2 < value.size()) {
+            codepoint = ((c & 0x07) << 18) | ((bytes[i] & 0x3f) << 12) |
+                        ((bytes[i + 1] & 0x3f) << 6) | (bytes[i + 2] & 0x3f);
+            i += 3;
+        }
+        if (codepoint <= 0xffff) {
+            output.push_back(static_cast<jchar>(codepoint));
+        } else {
+            codepoint -= 0x10000;
+            output.push_back(static_cast<jchar>(0xd800 + (codepoint >> 10)));
+            output.push_back(static_cast<jchar>(0xdc00 + (codepoint & 0x3ff)));
+        }
+    }
+    const jchar empty = 0;
+    return env->NewString(output.empty() ? &empty : output.data(), static_cast<jsize>(output.size()));
+}
 } // namespace
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -173,13 +238,12 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
                                          jint context_size, jint thread_count) {
     std::lock_guard<std::mutex> guard(g_mutex);
     clear_error();
-    const char *path = env->GetStringUTFChars(model_path, nullptr);
-    if (!path) { set_error("Path model tidak valid."); return -1; }
+    const std::string path = from_java_string(env, model_path);
+    if (path.empty()) { set_error("Path model tidak valid."); return -1; }
     free_model_locked();
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = 0; // CPU backend in the default APK.
-    g_model = llama_model_load_from_file(path, model_params);
-    env->ReleaseStringUTFChars(model_path, path);
+    g_model = llama_model_load_from_file(path.c_str(), model_params);
     if (!g_model) {
         set_error("llama.cpp gagal memuat GGUF. Periksa file, arsitektur, dan kapasitas RAM.");
         return -2;
@@ -230,16 +294,11 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
         set_error("Impor dan muat model GGUF terlebih dahulu."); return -1;
     }
     if (g_generation_active) { set_error("Generasi sebelumnya masih berjalan."); return -2; }
-    const char *system_chars = env->GetStringUTFChars(system_prompt, nullptr);
-    const char *user_chars = env->GetStringUTFChars(user_message, nullptr);
-    if (!system_chars || !user_chars) {
-        if (system_chars) env->ReleaseStringUTFChars(system_prompt, system_chars);
-        if (user_chars) env->ReleaseStringUTFChars(user_message, user_chars);
+    const std::string next_system = from_java_string(env, system_prompt);
+    const std::string user = from_java_string(env, user_message);
+    if (system_prompt == nullptr || user_message == nullptr) {
         set_error("Prompt tidak valid."); return -3;
     }
-    const std::string next_system(system_chars), user(user_chars);
-    env->ReleaseStringUTFChars(system_prompt, system_chars);
-    env->ReleaseStringUTFChars(user_message, user_chars);
     if (user.empty()) { set_error("Pesan tidak boleh kosong."); return -4; }
 
     if (next_system != g_system_prompt) {
@@ -305,12 +364,19 @@ Java_com_nexora_ai_NativeLlama_nextToken(JNIEnv *env, jobject) {
     --g_remaining_tokens;
 
     char piece[256];
-    const int32_t size = llama_token_to_piece(vocab, token, piece, sizeof(piece), 0, false);
+    int32_t size = llama_token_to_piece(vocab, token, piece, sizeof(piece), 0, false);
     if (size < 0) {
-        set_error("Potongan token melebihi buffer output.");
-        finish_generation_locked(); return nullptr;
+        std::string extended(static_cast<size_t>(-size), '\\0');
+        size = llama_token_to_piece(vocab, token, extended.data(),
+                                    static_cast<int32_t>(extended.size()), 0, false);
+        if (size < 0) {
+            set_error("Potongan token melebihi buffer output.");
+            finish_generation_locked(); return nullptr;
+        }
+        if (size > 0) g_utf8_pending.append(extended.data(), static_cast<size_t>(size));
+    } else if (size > 0) {
+        g_utf8_pending.append(piece, static_cast<size_t>(size));
     }
-    if (size > 0) g_utf8_pending.append(piece, static_cast<size_t>(size));
     if (!valid_utf8(g_utf8_pending)) return to_java_string(env, "");
     const std::string ready = g_utf8_pending;
     g_pending_response += ready;

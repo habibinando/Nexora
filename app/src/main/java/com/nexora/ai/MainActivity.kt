@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
                     onUnloadModel = ::unloadModel,
                     onRemoveModel = ::removeModel,
                     onSendMessage = ::sendMessage,
+                    onNewChat = ::newChat,
                     onDismissError = { errorText = null }
                 )
             }
@@ -262,8 +263,32 @@ class MainActivity : ComponentActivity() {
         if (isBusy || newMode == chatMode) return
         chatMode = newMode
         messages.clear()
-        if (activeModelId != null) {
-            lifecycleScope.launch(Dispatchers.IO) { NativeLlama.resetChat() }
+        resetNativeConversation("Menyiapkan mode ${newMode.label}…")
+    }
+
+    private fun newChat() {
+        if (isBusy) return
+        messages.clear()
+        resetNativeConversation("Membuat percakapan baru…")
+    }
+
+    private fun resetNativeConversation(label: String) {
+        if (activeModelId == null) {
+            statusText = "Percakapan dibersihkan."
+            return
+        }
+        isBusy = true
+        busyLabel = label
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) { NativeLlama.resetChat() }
+                statusText = "Konteks percakapan telah direset."
+            } catch (error: Throwable) {
+                errorText = error.message ?: "Gagal mereset percakapan."
+            } finally {
+                isBusy = false
+                busyLabel = ""
+            }
         }
     }
 
@@ -310,6 +335,19 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val generationError = withContext(Dispatchers.IO) { NativeLlama.lastError() }
+                if (output.isEmpty()) {
+                    val index = messages.lastIndex
+                    if (index >= 0) {
+                        messages[index] = ChatMessage(
+                            "assistant",
+                            if (generationError.isNotBlank()) {
+                                "Generasi berhenti: $generationError"
+                            } else {
+                                "Model tidak menghasilkan teks untuk prompt ini."
+                            }
+                        )
+                    }
+                }
                 if (generationError.isNotBlank()) errorText = generationError
                 statusText = "Inference selesai secara lokal."
             } catch (error: Throwable) {
