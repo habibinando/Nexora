@@ -217,7 +217,14 @@ class MainActivity : ComponentActivity() {
         val manager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val memory = ActivityManager.MemoryInfo()
         manager.getMemoryInfo(memory)
-        val estimatedNeed = (file.length() * 1.20).toLong() + 512L * 1024L * 1024L
+        val projectorFile = model.projectorPath?.let(::File)
+        if (projectorFile != null && (!projectorFile.isFile || !projectorFile.canRead())) {
+            errorText = "File mmproj tidak ditemukan. Impor ulang projector vision untuk model ini."
+            return
+        }
+        val projectorBytes = projectorFile?.length() ?: 0L
+        val estimatedNeed = ((file.length() + projectorBytes) * 1.20).toLong() +
+            512L * 1024L * 1024L
         if (memory.availMem < estimatedNeed) {
             errorText = "RAM tersedia belum cukup untuk memuat model ini dengan aman. " +
                 "Estimasi kebutuhan: ${formatBytes(estimatedNeed)}; tersedia: ${formatBytes(memory.availMem)}."
