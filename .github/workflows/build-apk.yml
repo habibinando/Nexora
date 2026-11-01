@@ -68,6 +68,11 @@ jobs:
           test -s "$APK"
           file "$APK"
           sha256sum "$APK"
+          unzip -l "$APK" | grep -E 'lib/arm64-v8a/lib(nexora-inference|llama|mtmd|ggml)'
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libnexora-inference.so'
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libllama.so'
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmtmd.so'
+
 
       - name: Publish rolling nightly APK
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

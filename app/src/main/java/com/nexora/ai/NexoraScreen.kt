@@ -9,7 +9,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -72,11 +75,21 @@ internal fun NexoraScreen(
     onLoadModel: (LocalModel) -> Unit,
     onUnloadModel: () -> Unit,
     onRemoveModel: (LocalModel) -> Unit,
+    onImportProjector: (LocalModel) -> Unit,
+    visionReady: Boolean,
+    visionImageName: String?,
+    visionResult: String,
+    isVisionImageSelected: Boolean,
+    onPickVisionImage: () -> Unit,
+    onAnalyzeVision: (String) -> Unit,
     onSendMessage: (String) -> Unit,
     onNewChat: () -> Unit,
     onDismissError: () -> Unit
 ) {
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+    Surface(
+        Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding(),
+        color = MaterialTheme.colorScheme.background
+    ) {
         Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 12.dp)) {
             Header(engineReady, activeModelId?.let { id -> models.firstOrNull { it.id == id }?.name })
             Spacer(Modifier.height(14.dp))
@@ -100,9 +113,15 @@ internal fun NexoraScreen(
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when (currentPage) {
                     AppPage.CHAT -> ChatPage(messages, activeModelId, models, chatMode, isBusy, onModeSelected, onSendMessage, onNewChat)
-                    AppPage.MODELS -> ModelsPage(models, activeModelId, engineReady, isBusy, busyLabel, onImportModel, onLoadModel, onUnloadModel, onRemoveModel)
+                    AppPage.MODELS -> ModelsPage(
+                        models, activeModelId, engineReady, isBusy, busyLabel,
+                        onImportModel, onLoadModel, onUnloadModel, onRemoveModel, onImportProjector
+                    )
                     AppPage.HARDWARE -> HardwarePage(hardwareInfo, systemInfo)
-                    AppPage.VISION -> VisionPage()
+                    AppPage.VISION -> VisionPage(
+                        visionReady, visionImageName, visionResult, isVisionImageSelected,
+                        isBusy, onPickVisionImage, onAnalyzeVision
+                    )
                 }
             }
 
@@ -247,7 +266,8 @@ private fun ModelsPage(
     onImportModel: () -> Unit,
     onLoadModel: (LocalModel) -> Unit,
     onUnloadModel: () -> Unit,
-    onRemoveModel: (LocalModel) -> Unit
+    onRemoveModel: (LocalModel) -> Unit,
+    onImportProjector: (LocalModel) -> Unit
 ) {
     Column(Modifier.fillMaxSize()) {
         Text("MODEL MANAGER", fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -279,6 +299,12 @@ private fun ModelsPage(
                                 Column(Modifier.weight(1f)) {
                                     Text(model.name, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                     Text(formatBytes(model.sizeBytes), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                                    Text(
+                                        if (model.projectorPath != null) "Vision projector: ${model.projectorName ?: "terpasang"}"
+                                        else "Vision projector: belum dipasang",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 10.sp
+                                    )
                                 }
                                 if (active) Text("AKTIF", color = Color(0xFF8FE0B0), fontSize = 10.sp, fontWeight = FontWeight.Bold)
                             }
@@ -288,6 +314,9 @@ private fun ModelsPage(
                                     Text(if (active) "Dimuat" else "Muat")
                                 }
                                 TextButton(onClick = { onRemoveModel(model) }, enabled = !isBusy) { Text("Hapus") }
+                            }
+                            TextButton(onClick = { onImportProjector(model) }, enabled = engineReady && !isBusy) {
+                                Text(if (model.projectorPath == null) "＋ Impor mmproj vision" else "Ganti mmproj vision")
                             }
                         }
                     }
@@ -315,12 +344,67 @@ private fun HardwarePage(hardwareInfo: String, systemInfo: String) {
 }
 
 @Composable
-private fun VisionPage() {
-    Column(Modifier.fillMaxSize()) {
-        EmptyState(
-            "Vision belum diaktifkan",
-            "Fitur vision sengaja tidak ditampilkan sebagai fitur aktif sampai encoder gambar dan runtime multimodal benar-benar terintegrasi. Tidak ada analisis gambar simulasi."
-        )
+private fun VisionPage(
+    visionReady: Boolean,
+    imageName: String?,
+    result: String,
+    imageSelected: Boolean,
+    isBusy: Boolean,
+    onPickImage: () -> Unit,
+    onAnalyze: (String) -> Unit
+) {
+    var question by remember { mutableStateOf("Jelaskan isi gambar ini secara detail.") }
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("VISION", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        if (!visionReady) {
+            EmptyState(
+                "Vision belum siap",
+                "Muat model multimodal yang kompatibel dan impor file mmproj pasangannya melalui Model Manager. Model teks biasa tidak dapat menganalisis gambar."
+            )
+        } else {
+            Text(
+                "Pemrosesan gambar berjalan di perangkat melalui encoder vision llama.cpp. File gambar tidak dikirim ke server.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp
+            )
+            Button(
+                onClick = onPickImage,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Text(if (imageSelected) "Ganti Gambar" else "Pilih Gambar")
+            }
+            Text(
+                imageName ?: "Belum ada gambar dipilih",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp
+            )
+            OutlinedTextField(
+                value = question,
+                onValueChange = { question = it },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isBusy,
+                label = { Text("Pertanyaan tentang gambar") },
+                minLines = 2,
+                maxLines = 5,
+                shape = RoundedCornerShape(16.dp)
+            )
+            Button(
+                onClick = { onAnalyze(question) },
+                enabled = imageSelected && !isBusy && question.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Text(if (isBusy) "Menganalisis…" else "Analisis Gambar")
+            }
+            if (result.isNotBlank()) {
+                InfoCard("Hasil analisis lokal", result)
+            }
+        }
     }
 }
 

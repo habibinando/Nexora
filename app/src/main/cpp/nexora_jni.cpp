@@ -1,6 +1,8 @@
 #include <jni.h>
 #include <llama.h>
 #include <ggml-backend.h>
+#include <mtmd.h>
+#include <mtmd-helper.h>
 #include <algorithm>
 #include <cstdint>
 #include <mutex>
@@ -13,6 +15,7 @@ std::mutex g_mutex;
 bool g_backend_initialized = false;
 llama_model *g_model = nullptr;
 llama_context *g_context = nullptr;
+mtmd_context *g_mtmd = nullptr;
 llama_sampler *g_sampler = nullptr;
 llama_batch g_batch{};
 bool g_batch_initialized = false;
@@ -37,6 +40,7 @@ void free_model_locked() {
     g_utf8_pending.clear();
     if (g_sampler) { llama_sampler_free(g_sampler); g_sampler = nullptr; }
     if (g_batch_initialized) { llama_batch_free(g_batch); g_batch_initialized = false; }
+    if (g_mtmd) { mtmd_free(g_mtmd); g_mtmd = nullptr; }
     if (g_context) { llama_free(g_context); g_context = nullptr; }
     if (g_model) { llama_model_free(g_model); g_model = nullptr; }
 }
@@ -235,10 +239,11 @@ Java_com_nexora_ai_NativeLlama_initialize(JNIEnv *env, jobject, jstring native_l
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_path,
-                                         jint context_size, jint thread_count) {
+                                         jstring projector_path, jint context_size, jint thread_count) {
     std::lock_guard<std::mutex> guard(g_mutex);
     clear_error();
     const std::string path = from_java_string(env, model_path);
+    const std::string projector = from_java_string(env, projector_path);
     if (path.empty()) { set_error("Path model tidak valid."); return -1; }
     free_model_locked();
     llama_model_params model_params = llama_model_default_params();
@@ -272,13 +277,27 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
         return -3;
     }
 
+    if (!projector.empty()) {
+        mtmd_context_params mtmd_params = mtmd_context_params_default();
+        mtmd_params.use_gpu = false;
+        mtmd_params.n_threads = std::max(1, static_cast<int32_t>(thread_count));
+        mtmd_params.print_timings = false;
+        mtmd_params.warmup = false;
+        g_mtmd = mtmd_init_from_file(projector.c_str(), g_model, mtmd_params);
+        if (g_mtmd == nullptr || !mtmd_support_vision(g_mtmd)) {
+            free_model_locked();
+            set_error("mmproj tidak cocok dengan model ini atau tidak menyediakan encoder vision yang didukung llama.cpp.");
+            return -4;
+        }
+    }
+
     g_batch = llama_batch_init(256, 0, 1);
     g_batch_initialized = true;
     g_sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
     if (!g_sampler) {
         free_model_locked();
         set_error("Gagal menginisialisasi sampler.");
-        return -4;
+        return -5;
     }
     llama_sampler_chain_add(g_sampler, llama_sampler_init_top_k(40));
     llama_sampler_chain_add(g_sampler, llama_sampler_init_top_p(0.90f, 1));
@@ -286,6 +305,161 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     llama_sampler_chain_add(g_sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
     g_position = 0;
     g_history.clear();
+    return 0;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_nexora_ai_NativeLlama_hasVision(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    return (g_mtmd != nullptr && mtmd_support_vision(g_mtmd)) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring system_prompt,
+                                                 jstring user_message, jbyteArray image_bytes,
+                                                 jint max_tokens) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    clear_error();
+    if (!g_model || !g_context || !g_sampler) {
+        set_error("Muat model GGUF terlebih dahulu.");
+        return -1;
+    }
+    if (g_mtmd == nullptr || !mtmd_support_vision(g_mtmd)) {
+        set_error("Model vision belum aktif. Impor mmproj yang cocok, lalu muat ulang model.");
+        return -2;
+    }
+    if (g_generation_active) {
+        set_error("Generasi sebelumnya masih berjalan.");
+        return -3;
+    }
+    if (image_bytes == nullptr) {
+        set_error("Pilih gambar terlebih dahulu.");
+        return -4;
+    }
+
+    const std::string next_system = from_java_string(env, system_prompt);
+    const std::string user = from_java_string(env, user_message);
+    if (system_prompt == nullptr || user_message == nullptr || user.empty()) {
+        set_error("Pertanyaan vision tidak boleh kosong.");
+        return -5;
+    }
+
+    const jsize image_length = env->GetArrayLength(image_bytes);
+    if (image_length <= 0 || image_length > 20 * 1024 * 1024) {
+        set_error("Ukuran gambar harus lebih dari 0 byte dan maksimal 20 MB.");
+        return -6;
+    }
+    std::vector<unsigned char> image(static_cast<size_t>(image_length));
+    env->GetByteArrayRegion(image_bytes, 0, image_length,
+                            reinterpret_cast<jbyte *>(image.data()));
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        set_error("Gagal membaca byte gambar dari Android.");
+        return -7;
+    }
+
+    // Image turns are one-shot: their embeddings are not persisted in text history.
+    llama_memory_clear(llama_get_memory(g_context), true);
+    g_position = 0;
+    g_history.clear();
+    g_system_prompt = next_system;
+
+    const std::string marker = mtmd_default_marker();
+    const std::string formatted = format_prompt_locked(user + "\\n" + marker);
+    if (formatted.empty()) {
+        if (g_last_error.empty()) set_error("Prompt vision kosong setelah pemformatan.");
+        return -8;
+    }
+    const size_t marker_pos = formatted.find(marker);
+    if (marker_pos == std::string::npos ||
+        formatted.find(marker, marker_pos + marker.size()) != std::string::npos) {
+        set_error("Template chat model mengubah atau menggandakan marker gambar; vision tidak dapat diproses.");
+        return -9;
+    }
+
+    mtmd_helper_init_opt bitmap_options = mtmd_helper_init_opt_default();
+    mtmd_helper_bitmap_wrapper bitmap_wrapper = mtmd_helper_bitmap_init_from_buf(
+        g_mtmd, image.data(), image.size(), false, bitmap_options
+    );
+    if (bitmap_wrapper.bitmap == nullptr) {
+        set_error("Format gambar tidak dapat dibaca oleh backend vision. Gunakan JPG, PNG, atau BMP.");
+        if (bitmap_wrapper.video_ctx != nullptr) mtmd_helper_video_free(bitmap_wrapper.video_ctx);
+        return -10;
+    }
+
+    const std::string before = formatted.substr(0, marker_pos);
+    const std::string after = formatted.substr(marker_pos + marker.size());
+    mtmd_input_text text_before{before.data(), before.size(), false, true};
+    mtmd_input_text text_after{after.data(), after.size(), false, true};
+    mtmd_input_part parts[3] = {
+        {&text_before, nullptr},
+        {nullptr, bitmap_wrapper.bitmap},
+        {&text_after, nullptr}
+    };
+    const mtmd_input_part *part_ptrs[3] = {&parts[0], &parts[1], &parts[2]};
+
+    mtmd_input_chunks *chunks = mtmd_input_chunks_init();
+    if (chunks == nullptr) {
+        mtmd_bitmap_free(bitmap_wrapper.bitmap);
+        if (bitmap_wrapper.video_ctx != nullptr) mtmd_helper_video_free(bitmap_wrapper.video_ctx);
+        set_error("Gagal mengalokasikan buffer multimodal.");
+        return -11;
+    }
+
+    const int32_t tokenize_result = mtmd_tokenize_from_parts(
+        g_mtmd, chunks, part_ptrs, 3, true
+    );
+    if (tokenize_result != 0) {
+        mtmd_input_chunks_free(chunks);
+        mtmd_bitmap_free(bitmap_wrapper.bitmap);
+        if (bitmap_wrapper.video_ctx != nullptr) mtmd_helper_video_free(bitmap_wrapper.video_ctx);
+        set_error("Preprocessing vision gagal (kode " + std::to_string(tokenize_result) + ").");
+        return -12;
+    }
+
+    const size_t chunk_count = mtmd_input_chunks_size(chunks);
+    bool evaluated = chunk_count > 0;
+    for (size_t index = 0; evaluated && index < chunk_count; ++index) {
+        const mtmd_input_chunk *chunk = mtmd_input_chunks_get(chunks, index);
+        llama_pos next_position = g_position;
+        const int32_t result = mtmd_helper_eval_chunk_single(
+            g_mtmd, g_context, chunk, g_position, 0, 256,
+            index + 1 == chunk_count, &next_position
+        );
+        if (result != 0) {
+            set_error("Encoder/decode vision gagal pada chunk " + std::to_string(index) +
+                      " (kode " + std::to_string(result) + ").");
+            evaluated = false;
+            break;
+        }
+        g_position = static_cast<int32_t>(next_position);
+    }
+
+    mtmd_input_chunks_free(chunks);
+    mtmd_bitmap_free(bitmap_wrapper.bitmap);
+    if (bitmap_wrapper.video_ctx != nullptr) mtmd_helper_video_free(bitmap_wrapper.video_ctx);
+
+    if (!evaluated) {
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        if (g_last_error.empty()) set_error("Vision tidak menghasilkan chunk multimodal.");
+        return -13;
+    }
+
+    const int32_t requested_tokens = std::max(1, std::min(1024, static_cast<int32_t>(max_tokens)));
+    if (g_position + requested_tokens >= g_context_size) {
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        set_error("Gambar dan prompt terlalu besar untuk context model ini.");
+        return -14;
+    }
+
+    llama_sampler_reset(g_sampler);
+    g_pending_user.clear();
+    g_pending_response.clear();
+    g_utf8_pending.clear();
+    g_remaining_tokens = requested_tokens;
+    g_generation_active = true;
     return 0;
 }
 

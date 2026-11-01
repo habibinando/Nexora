@@ -21,7 +21,9 @@ class ModelFileValidatorTest {
     }
 
     @Test
-    fun rejectsShardedInputUntilMultiFileImportIsSupported() {
+    fun rejectsEveryShardUntilMultiFileImportIsSupported() {
         assertFalse(ModelFileValidator.isSupportedSingleFile("model-00001-of-00003.gguf"))
+        assertFalse(ModelFileValidator.isSupportedSingleFile("model-00002-of-00003.gguf"))
+        assertFalse(ModelFileValidator.isSupportedSingleFile("model-00003-of-00003.gguf"))
     }
 }
