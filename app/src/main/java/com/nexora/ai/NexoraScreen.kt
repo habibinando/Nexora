@@ -41,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -84,6 +85,8 @@ internal fun NexoraScreen(
     errorText: String?,
     systemInfo: String,
     hardwareInfo: String,
+    benchmarkResult: String,
+    onRunBenchmark: () -> Unit,
     onPageSelected: (AppPage) -> Unit,
     onModeSelected: (ChatMode) -> Unit,
     onImportModel: () -> Unit,
@@ -157,7 +160,14 @@ internal fun NexoraScreen(
                         onRemoveModel = onRemoveModel,
                         onImportProjector = onImportProjector
                     )
-                    AppPage.HARDWARE -> HardwarePage(hardwareInfo, systemInfo)
+                    AppPage.HARDWARE -> HardwarePage(
+                        hardwareInfo = hardwareInfo,
+                        systemInfo = systemInfo,
+                        benchmarkResult = benchmarkResult,
+                        benchmarkEnabled = activeModelId != null,
+                        isBusy = isBusy,
+                        onRunBenchmark = onRunBenchmark
+                    )
                     AppPage.VISION -> VisionPage(
                         visionReady, visionImageName, visionResult, isVisionImageSelected,
                         isBusy, onPickVisionImage, onAnalyzeVision
@@ -671,13 +681,45 @@ private fun ModelsPage(
 }
 
 @Composable
-private fun HardwarePage(hardwareInfo: String, systemInfo: String) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("PERANGKAT", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        InfoCard("Hardware & RAM", hardwareInfo)
-        InfoCard("Informasi backend aktual", systemInfo)
+private fun HardwarePage(
+    hardwareInfo: String,
+    systemInfo: String,
+    benchmarkResult: String,
+    benchmarkEnabled: Boolean,
+    isBusy: Boolean,
+    onRunBenchmark: () -> Unit
+) {
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(stringResource(R.string.hardware_title), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        InfoCard(stringResource(R.string.hardware_ram_title), hardwareInfo)
+        InfoCard(stringResource(R.string.hardware_backend_title), systemInfo)
         Text(
-            "Build ini memakai backend CPU ARM64 yang dioptimalkan llama.cpp. Vulkan merupakan opsi build terpisah dan tidak diklaim aktif pada APK CPU.",
+            stringResource(R.string.benchmark_prompt_description),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp
+        )
+        Button(
+            onClick = onRunBenchmark,
+            enabled = benchmarkEnabled && !isBusy,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Text(stringResource(R.string.benchmark_run))
+        }
+        InfoCard(
+            stringResource(R.string.benchmark_results_title),
+            benchmarkResult.ifBlank { stringResource(R.string.benchmark_not_run) }
+        )
+        Text(
+            stringResource(R.string.benchmark_metrics_note),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 11.sp
+        )
+        Text(
+            stringResource(R.string.hardware_backend_note),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 11.sp
         )

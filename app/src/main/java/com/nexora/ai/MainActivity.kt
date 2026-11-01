@@ -56,6 +56,7 @@ class MainActivity : ComponentActivity() {
     private var busyLabel by mutableStateOf("")
     private var busyProgress by mutableStateOf(-1f)
     private var progressDetail by mutableStateOf("")
+    private var benchmarkResult by mutableStateOf("")
     private var maxOutputTokens by mutableStateOf(4096)
     private var generationPreview by mutableStateOf("")
     private var statusText by mutableStateOf("Menyiapkan runtime lokal…")
@@ -110,6 +111,8 @@ class MainActivity : ComponentActivity() {
                     errorText = errorText,
                     systemInfo = systemInfo,
                     hardwareInfo = hardwareInfo,
+                    benchmarkResult = benchmarkResult,
+                    onRunBenchmark = ::runHardwareBenchmark,
                     onPageSelected = { page = it },
                     onModeSelected = ::changeMode,
                     onImportModel = ::launchModelPicker,
@@ -356,6 +359,7 @@ class MainActivity : ComponentActivity() {
                 val activeContextSize = withContext(Dispatchers.IO) { NativeLlama.contextSize() }
                 progressDetail = "Model dan sampler siap · Context aktual ${activeContextSize.coerceAtLeast(0)} token"
                 activeModelId = model.id
+                benchmarkResult = ""
                 visionSupported = withContext(Dispatchers.IO) { NativeLlama.hasVision() }
                 visionImageBytes = null
                 visionImageName = null
@@ -385,6 +389,7 @@ class MainActivity : ComponentActivity() {
             try {
                 withContext(Dispatchers.IO) { NativeLlama.unload() }
                 activeModelId = null
+                benchmarkResult = ""
                 visionSupported = false
                 messages.clear()
                 visionResult = ""
@@ -592,6 +597,119 @@ class MainActivity : ComponentActivity() {
                 progressDetail = ""
             }
         }
+    }
+
+    private fun runHardwareBenchmark() {
+        if (isBusy || !engineReady) return
+        val activeModel = models.firstOrNull { it.id == activeModelId }
+        if (activeModel == null) {
+            errorText = getString(R.string.benchmark_model_required)
+            return
+        }
+
+        val prompt = getString(R.string.benchmark_prompt)
+        benchmarkResult = ""
+        errorText = null
+        isBusy = true
+        busyLabel = getString(R.string.benchmark_running)
+        busyProgress = 0f
+        progressDetail = getString(R.string.benchmark_prompt_description)
+
+        lifecycleScope.launch {
+            try {
+                val task = async(Dispatchers.IO) {
+                    NativeLlama.runBenchmark(prompt, 128)
+                }
+                while (!task.isCompleted) {
+                    updateBenchmarkProgress(NativeLlama.inferenceStats())
+                    delay(100)
+                }
+
+                val result = task.await()
+                if (result != 0) {
+                    val detail = withContext(Dispatchers.IO) { NativeLlama.lastError() }
+                    error("Benchmark gagal (kode $result). $detail")
+                }
+
+                val metrics = withContext(Dispatchers.IO) { NativeLlama.benchmarkStats() }
+                if (metrics.size < 8) error("Data benchmark native tidak lengkap.")
+
+                val loadNs = metrics[0]
+                val prefillStart = metrics[1]
+                val prefillEnd = metrics[2]
+                val promptTokens = metrics[3].coerceAtLeast(0L)
+                val decodeStart = metrics[4]
+                val decodeEnd = metrics[5]
+                val generatedTokens = metrics[6].coerceAtLeast(0L)
+                val peakRssBytes = metrics[7]
+
+                benchmarkResult = getString(
+                    R.string.benchmark_result,
+                    activeModel.name,
+                    benchmarkRate(promptTokens, prefillStart, prefillEnd),
+                    benchmarkDuration(prefillEnd - prefillStart),
+                    promptTokens.toString(),
+                    benchmarkRate(generatedTokens, decodeStart, decodeEnd),
+                    generatedTokens.toString(),
+                    benchmarkDuration(decodeEnd - decodeStart),
+                    benchmarkDuration(loadNs),
+                    if (peakRssBytes > 0L) formatBytes(peakRssBytes) else getString(R.string.not_available)
+                )
+                busyProgress = 1f
+                busyLabel = getString(R.string.benchmark_finished)
+                progressDetail = getString(R.string.benchmark_actual_tokens, generatedTokens.toString())
+                statusText = getString(R.string.benchmark_finished)
+            } catch (error: Throwable) {
+                errorText = error.message ?: getString(R.string.benchmark_failed)
+                benchmarkResult = ""
+            } finally {
+                isBusy = false
+                busyLabel = ""
+                busyProgress = -1f
+                progressDetail = ""
+            }
+        }
+    }
+
+    private fun updateBenchmarkProgress(stats: IntArray) {
+        val phase = stats.getOrNull(0) ?: 0
+        val promptProcessed = stats.getOrNull(1) ?: 0
+        val promptTotal = stats.getOrNull(2) ?: 0
+        val generated = stats.getOrNull(3) ?: 0
+        val outputTarget = stats.getOrNull(4) ?: 128
+
+        when (phase) {
+            1 -> {
+                val ratio = if (promptTotal > 0) promptProcessed.toFloat() / promptTotal else 0f
+                busyProgress = (ratio.coerceIn(0f, 1f) * 0.45f).coerceIn(0f, 0.45f)
+                progressDetail = getString(
+                    R.string.benchmark_prefill_progress,
+                    promptProcessed,
+                    promptTotal
+                )
+            }
+            2 -> {
+                val ratio = if (outputTarget > 0) generated.toFloat() / outputTarget else 0f
+                busyProgress = (0.45f + ratio.coerceIn(0f, 1f) * 0.55f).coerceIn(0.45f, 0.995f)
+                progressDetail = getString(
+                    R.string.benchmark_decode_progress,
+                    generated,
+                    outputTarget
+                )
+            }
+        }
+    }
+
+    private fun benchmarkRate(tokens: Long, startedNs: Long, endedNs: Long): String {
+        val elapsedNs = endedNs - startedNs
+        if (tokens <= 0L || elapsedNs <= 0L) return getString(R.string.not_available)
+        val rate = tokens.toDouble() * 1_000_000_000.0 / elapsedNs.toDouble()
+        return String.format(java.util.Locale.US, "%.2f tok/s", rate)
+    }
+
+    private fun benchmarkDuration(durationNs: Long): String {
+        if (durationNs <= 0L) return getString(R.string.not_available)
+        return String.format(java.util.Locale.US, "%.2f s", durationNs / 1_000_000_000.0)
     }
 
     private fun updateInferenceProgress(stats: IntArray, startedAt: Long, inputLabel: String) {

@@ -5,8 +5,10 @@
 #include <mtmd-helper.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <sys/resource.h>
 #include <string>
 #include <utility>
 #include <vector>
@@ -33,6 +35,41 @@ std::atomic<int32_t> g_prompt_processed{0};
 std::atomic<int32_t> g_prompt_total{0};
 std::atomic<int32_t> g_generated_tokens{0};
 std::atomic<int32_t> g_generation_limit{0};
+std::atomic<int64_t> g_last_load_duration_ns{0};
+
+struct BenchmarkMetrics {
+    int64_t prefill_start_ns = 0;
+    int64_t prefill_end_ns = 0;
+    int64_t prompt_tokens = 0;
+    int64_t decode_start_ns = 0;
+    int64_t decode_end_ns = 0;
+    int64_t generated_tokens = 0;
+    int64_t peak_rss_bytes = 0;
+};
+BenchmarkMetrics g_benchmark_metrics{};
+
+int64_t monotonic_time_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()
+    ).count();
+}
+
+int64_t process_peak_rss_bytes() {
+    struct rusage usage {};
+    if (getrusage(RUSAGE_SELF, &usage) != 0 || usage.ru_maxrss <= 0) return 0;
+    // Linux and Android report ru_maxrss in KiB.
+    return static_cast<int64_t>(usage.ru_maxrss) * 1024;
+}
+
+struct ScopedLoadTimer {
+    std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+    ~ScopedLoadTimer() {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started
+        ).count();
+        g_last_load_duration_ns.store(elapsed, std::memory_order_relaxed);
+    }
+};
 
 bool model_load_progress_callback(float progress, void *) {
     const float safe_progress = std::clamp(progress, 0.0f, 1.0f);
@@ -264,6 +301,7 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_path,
                                          jstring projector_path, jint context_size, jint thread_count) {
     std::lock_guard<std::mutex> guard(g_mutex);
+    ScopedLoadTimer load_timer;
     clear_error();
     const std::string path = from_java_string(env, model_path);
     const std::string projector = from_java_string(env, projector_path);
@@ -364,6 +402,150 @@ Java_com_nexora_ai_NativeLlama_inferenceStats(JNIEnv *env, jobject) {
     };
     jintArray result = env->NewIntArray(5);
     if (result != nullptr) env->SetIntArrayRegion(result, 0, 5, values);
+    return result;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_nexora_ai_NativeLlama_runBenchmark(JNIEnv *env, jobject, jstring prompt, jint max_tokens) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    clear_error();
+
+    if (!g_model || !g_context || !g_sampler || !g_batch_initialized) {
+        set_error("Muat model GGUF sebelum menjalankan benchmark.");
+        return -1;
+    }
+    if (g_generation_active) {
+        set_error("Selesaikan atau hentikan generasi aktif sebelum benchmark.");
+        return -2;
+    }
+    if (prompt == nullptr) {
+        set_error("Prompt benchmark tidak valid.");
+        return -3;
+    }
+
+    const std::string benchmark_prompt = from_java_string(env, prompt);
+    const int32_t token_limit = std::clamp(static_cast<int32_t>(max_tokens), 1, 128);
+    if (benchmark_prompt.empty() || token_limit <= 0) {
+        set_error("Prompt atau batas token benchmark tidak valid.");
+        return -3;
+    }
+
+    // Benchmark uses the loaded model/context, then restores native conversation
+    // history. The next chat turn rebuilds KV from that preserved history.
+    std::vector<std::pair<std::string, std::string>> saved_history = g_history;
+    const std::string saved_system_prompt = g_system_prompt;
+    auto restore_conversation = [&]() {
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        g_history = std::move(saved_history);
+        g_system_prompt = saved_system_prompt;
+        g_generation_active = false;
+        g_remaining_tokens = 0;
+        g_pending_user.clear();
+        g_pending_response.clear();
+        g_utf8_pending.clear();
+        llama_sampler_reset(g_sampler);
+        g_inference_phase.store(0, std::memory_order_relaxed);
+    };
+
+    llama_memory_clear(llama_get_memory(g_context), true);
+    g_position = 0;
+    g_history.clear();
+    g_system_prompt = "You are running a fixed on-device inference benchmark. Answer in Indonesian.";
+    g_pending_user.clear();
+    g_pending_response.clear();
+    g_utf8_pending.clear();
+    g_generated_tokens.store(0, std::memory_order_relaxed);
+    g_generation_limit.store(token_limit, std::memory_order_relaxed);
+    g_benchmark_metrics = {};
+
+    const std::string formatted = format_prompt_locked(benchmark_prompt);
+    if (formatted.empty()) {
+        if (g_last_error.empty()) set_error("Prompt benchmark kosong setelah pemformatan.");
+        restore_conversation();
+        return -4;
+    }
+
+    const std::vector<llama_token> tokens = tokenize_locked(formatted);
+    if (!g_last_error.empty() || tokens.empty()) {
+        if (g_last_error.empty()) set_error("Prompt benchmark tidak menghasilkan token.");
+        restore_conversation();
+        return -5;
+    }
+    if (tokens.size() >= static_cast<size_t>(g_context_size)) {
+        set_error("Prompt benchmark melebihi context model.");
+        restore_conversation();
+        return -6;
+    }
+
+    g_benchmark_metrics.prompt_tokens = static_cast<int64_t>(tokens.size());
+    g_prompt_processed.store(0, std::memory_order_relaxed);
+    g_prompt_total.store(static_cast<int32_t>(tokens.size()), std::memory_order_relaxed);
+    g_inference_phase.store(1, std::memory_order_relaxed);
+
+    g_benchmark_metrics.prefill_start_ns = monotonic_time_ns();
+    const bool prefill_ok = decode_tokens_locked(tokens);
+    g_benchmark_metrics.prefill_end_ns = monotonic_time_ns();
+    if (!prefill_ok) {
+        restore_conversation();
+        return -7;
+    }
+
+    llama_sampler_reset(g_sampler);
+    g_inference_phase.store(2, std::memory_order_relaxed);
+    g_generated_tokens.store(0, std::memory_order_relaxed);
+    g_benchmark_metrics.decode_start_ns = monotonic_time_ns();
+
+    int32_t generated = 0;
+    int32_t decode_result = 0;
+    const llama_vocab *vocab = llama_model_get_vocab(g_model);
+    while (generated < token_limit && g_position < g_context_size - 1) {
+        const llama_token token = llama_sampler_sample(g_sampler, g_context, -1);
+        llama_sampler_accept(g_sampler, token);
+        if (llama_vocab_is_eog(vocab, token)) break;
+
+        g_batch.n_tokens = 1;
+        g_batch.token[0] = token;
+        g_batch.pos[0] = g_position;
+        g_batch.n_seq_id[0] = 1;
+        g_batch.seq_id[0][0] = 0;
+        g_batch.logits[0] = 1;
+
+        decode_result = llama_decode(g_context, g_batch);
+        if (decode_result != 0) {
+            set_error("llama_decode gagal saat benchmark (kode " +
+                      std::to_string(decode_result) + ").");
+            break;
+        }
+        ++g_position;
+        ++generated;
+        g_generated_tokens.store(generated, std::memory_order_relaxed);
+    }
+
+    g_benchmark_metrics.decode_end_ns = monotonic_time_ns();
+    g_benchmark_metrics.generated_tokens = generated;
+    g_benchmark_metrics.peak_rss_bytes = process_peak_rss_bytes();
+    restore_conversation();
+
+    if (decode_result != 0) return -8;
+    return 0;
+}
+
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_nexora_ai_NativeLlama_benchmarkStats(JNIEnv *env, jobject) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    const jlong values[8] = {
+        static_cast<jlong>(g_last_load_duration_ns.load(std::memory_order_relaxed)),
+        static_cast<jlong>(g_benchmark_metrics.prefill_start_ns),
+        static_cast<jlong>(g_benchmark_metrics.prefill_end_ns),
+        static_cast<jlong>(g_benchmark_metrics.prompt_tokens),
+        static_cast<jlong>(g_benchmark_metrics.decode_start_ns),
+        static_cast<jlong>(g_benchmark_metrics.decode_end_ns),
+        static_cast<jlong>(g_benchmark_metrics.generated_tokens),
+        static_cast<jlong>(g_benchmark_metrics.peak_rss_bytes)
+    };
+    jlongArray result = env->NewLongArray(8);
+    if (result != nullptr) env->SetLongArrayRegion(result, 0, 8, values);
     return result;
 }
 

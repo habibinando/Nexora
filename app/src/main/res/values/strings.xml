@@ -1,4 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Nexora</string>
+    <string name="hardware_title">PERANGKAT</string>
+    <string name="hardware_ram_title">Hardware &amp; RAM</string>
+    <string name="hardware_backend_title">Informasi backend aktual</string>
+    <string name="hardware_backend_note">Build ini memakai backend CPU ARM64 yang dioptimalkan llama.cpp. Vulkan merupakan opsi build terpisah dan tidak diklaim aktif pada APK CPU.</string>
+    <string name="benchmark_run">Jalankan Benchmark</string>
+    <string name="benchmark_running">Menjalankan benchmark…</string>
+    <string name="benchmark_finished">Benchmark selesai.</string>
+    <string name="benchmark_failed">Benchmark gagal.</string>
+    <string name="benchmark_model_required">Muat model GGUF terlebih dahulu.</string>
+    <string name="benchmark_prompt_description">Uji memakai prompt tetap dan batas output 128 token. Hasil prefill dan decode diukur terpisah oleh clock monotonic native.</string>
+    <string name="benchmark_prompt">Jelaskan secara ringkas bagaimana inferensi model bahasa lokal berjalan di perangkat Android. Jawab dalam bahasa Indonesia dengan kalimat utuh dan lanjutkan sampai batas token.</string>
+    <string name="benchmark_not_run">Belum ada hasil. Muat model GGUF lalu jalankan benchmark.</string>
+    <string name="benchmark_results_title">Hasil benchmark terakhir</string>
+    <string name="benchmark_result">Model: %1$s
+Prefill: %2$s · %3$s · %4$s token prompt
+Decode: %5$s · %6$s / 128 token aktual · %7$s
+Waktu load model: %8$s
+Peak RSS proses: %9$s</string>
+    <string name="benchmark_actual_tokens">%1$s token output aktual · target 128</string>
+    <string name="benchmark_prefill_progress">%1$d / %2$d token prompt diproses</string>
+    <string name="benchmark_decode_progress">%1$d / %2$d token output diproses</string>
+    <string name="benchmark_metrics_note">Catatan: model dapat mengakhiri output lebih awal dengan EOS, sehingga jumlah aktual bisa kurang dari 128 token. Peak RSS adalah high-water mark proses Android sejak proses dimulai, bukan pengukuran RAM perangkat.</string>
+    <string name="not_available">Tidak tersedia</string>
 </resources>

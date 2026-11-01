@@ -65,3 +65,18 @@ Tidak ada angka yang diestimasi atau direkayasa. Benchmark harus dijalankan pada
 ## Batasan perubahan
 
 Audit ini hanya menambahkan dokumen progres. Tidak mengubah source Kotlin, Compose, JNI/C++, dependency, Gradle, manifest, workflow, llama.cpp pin, atau konfigurasi izin aplikasi. Tidak ada branch lain yang dibuat.
+
+
+## B0 — Instrumentasi benchmark ditambahkan
+
+- Commit implementasi: akan tercatat pada commit setelah bagian ini.
+- Tambahan native JNI: `runBenchmark(prompt, 128)` dan `benchmarkStats()`.
+- Prompt benchmark tetap diambil dari `strings.xml`; benchmark menggunakan model yang sedang dimuat dan sampler/context native.
+- Pengukuran menggunakan timestamp `std::chrono::steady_clock` dari native untuk awal/akhir prefill dan decode.
+- Waktu load model diukur native sejak masuk hingga keluar dari `loadModel()`.
+- Memori ditampilkan sebagai peak RSS proses melalui `getrusage(RUSAGE_SELF)`, bukan sebagai delta RAM khusus benchmark.
+- Riwayat percakapan native disimpan, KV benchmark dibersihkan setelah pengujian, dan state history/system prompt dipulihkan. Giliran chat berikutnya membangun ulang KV dari riwayat tersebut.
+- Batas decode yang diminta adalah 128 token. Jumlah aktual tetap dilaporkan karena model dapat menghasilkan EOS lebih awal atau context dapat membatasi generasi.
+- Progres UI hanya memakai penghitung token native; tok/s final dihitung dari timestamp native.
+- **Status pengukuran perangkat: masih belum dilakukan.** Instrumentasi bukan pengganti eksekusi pada HP ARM64 dengan model GGUF pengguna. B0 tetap BLOCKED sampai hasil perangkat nyata dicatat.
+- **Validasi build perangkat: belum dijalankan.** Lingkungan sesi tidak menyediakan Android SDK/NDK, ADB, atau akses jaringan untuk checkout repo.
