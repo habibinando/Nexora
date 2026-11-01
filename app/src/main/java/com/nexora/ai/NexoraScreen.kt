@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -42,6 +43,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -75,6 +77,9 @@ internal fun NexoraScreen(
     busyLabel: String,
     busyProgress: Float,
     progressDetail: String,
+    generationPreview: String,
+    maxOutputTokens: Int,
+    onMaxOutputTokensChange: (Int) -> Unit,
     statusText: String,
     errorText: String?,
     systemInfo: String,
@@ -122,7 +127,22 @@ internal fun NexoraScreen(
 
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when (currentPage) {
-                    AppPage.CHAT -> ChatPage(messages, activeModelId, models, chatMode, isBusy, onModeSelected, onSendMessage, onNewChat)
+                    AppPage.CHAT -> ChatPage(
+                        messages = messages,
+                        activeModelId = activeModelId,
+                        models = models,
+                        chatMode = chatMode,
+                        isBusy = isBusy,
+                        busyLabel = busyLabel,
+                        busyProgress = busyProgress,
+                        progressDetail = progressDetail,
+                        generationPreview = generationPreview,
+                        maxOutputTokens = maxOutputTokens,
+                        onMaxOutputTokensChange = onMaxOutputTokensChange,
+                        onModeSelected = onModeSelected,
+                        onSendMessage = onSendMessage,
+                        onNewChat = onNewChat
+                    )
                     AppPage.MODELS -> ModelsPage(
                         models, activeModelId, engineReady, isBusy, busyLabel,
                         onImportModel, onLoadModel, onUnloadModel, onRemoveModel, onImportProjector
@@ -227,11 +247,19 @@ private fun ChatPage(
     models: List<LocalModel>,
     chatMode: ChatMode,
     isBusy: Boolean,
+    busyLabel: String,
+    busyProgress: Float,
+    progressDetail: String,
+    generationPreview: String,
+    maxOutputTokens: Int,
+    onMaxOutputTokensChange: (Int) -> Unit,
     onModeSelected: (ChatMode) -> Unit,
     onSendMessage: (String) -> Unit,
     onNewChat: () -> Unit
 ) {
     var input by remember { mutableStateOf("") }
+    var showGenerationSettings by remember { mutableStateOf(false) }
+    var maxTokensInput by remember(maxOutputTokens) { mutableStateOf(maxOutputTokens.toString()) }
     Column(Modifier.fillMaxSize()) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             ChatMode.entries.forEach { mode ->
@@ -246,6 +274,38 @@ private fun ChatPage(
                 ) { Text(mode.label, fontSize = 12.sp) }
             }
             TextButton(onClick = onNewChat, enabled = !isBusy) { Text("Baru") }
+            TextButton(
+                onClick = { showGenerationSettings = !showGenerationSettings },
+                enabled = !isBusy
+            ) { Text("Batas: ${"%,d".format(java.util.Locale.US, maxOutputTokens)}") }
+        }
+        if (showGenerationSettings) {
+            Card(
+                Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Maksimum output token", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    OutlinedTextField(
+                        value = maxTokensInput,
+                        onValueChange = { raw ->
+                            val digits = raw.filter(Char::isDigit).take(6)
+                            maxTokensInput = digits
+                            digits.toIntOrNull()?.let { onMaxOutputTokensChange(it.coerceIn(1, 100000)) }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        label = { Text("1–100.000 token") }
+                    )
+                    Text(
+                        "100.000 adalah batas konfigurasi aplikasi. Jumlah aktual dibatasi sisa context model yang dimuat dan memori perangkat.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp
+                    )
+                }
+            }
         }
         Spacer(Modifier.height(12.dp))
 
@@ -267,6 +327,16 @@ private fun ChatPage(
             ) {
                 messages.forEach { MessageCard(it, chatMode) }
             }
+        }
+
+        if (isBusy && activeModelId != null) {
+            GenerationProgressCard(
+                busyLabel = busyLabel,
+                progress = busyProgress,
+                progressDetail = progressDetail,
+                liveDraft = generationPreview
+            )
+            Spacer(Modifier.height(10.dp))
         }
 
         Spacer(Modifier.height(10.dp))
@@ -296,11 +366,15 @@ private data class MessagePart(
     val code: String? = null
 )
 
-private fun splitMessageContent(content: String): List<MessagePart> {
+private fun splitMessageContent(content: String, chatMode: ChatMode): List<MessagePart> {
     val codeFence = Regex("""(?s)\x60\x60\x60([^\n\x60]*)\n(.*?)\x60\x60\x60""")
+    val matches = codeFence.findAll(content).toList()
+    if (matches.isEmpty() && chatMode == ChatMode.CODING && looksLikeSourceCode(content)) {
+        return listOf(MessagePart(language = detectCodeLanguage(content), code = content.trimEnd()))
+    }
     val parts = mutableListOf<MessagePart>()
     var cursor = 0
-    for (match in codeFence.findAll(content)) {
+    for (match in matches) {
         if (match.range.first > cursor) {
             parts += MessagePart(text = content.substring(cursor, match.range.first))
         }
@@ -315,6 +389,28 @@ private fun splitMessageContent(content: String): List<MessagePart> {
     return parts
 }
 
+private fun looksLikeSourceCode(content: String): Boolean {
+    val lines = content.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+    if (lines.size < 3) return false
+    val declarations = Regex("""^(import\s+|from\s+\S+\s+import\s+|def\s+|async\s+def\s+|class\s+|fun\s+|package\s+|#include\s+|const\s+|let\s+|var\s+|USER_AGENTS\s*=)""")
+    val declarationCount = lines.count { declarations.containsMatchIn(it) }
+    val structuralCount = lines.count { line ->
+        line.startsWith("}") || line.startsWith(")") || line.endsWith("{") ||
+            line.endsWith(";") || line.contains(" = ") || line.startsWith("return ")
+    }
+    return declarationCount >= 2 || (declarationCount >= 1 && structuralCount >= 3)
+}
+
+private fun detectCodeLanguage(content: String): String {
+    return when {
+        content.contains("#include ") || content.contains("std::") -> "CPP"
+        Regex("""(?m)^\s*(fun|val|var|package)\s+""").containsMatchIn(content) -> "KOTLIN"
+        Regex("""(?m)^\s*(def|async\s+def|from\s+\S+\s+import)\s+""").containsMatchIn(content) -> "PYTHON"
+        Regex("""(?m)^\s*(const|let|function|export)\s+""").containsMatchIn(content) -> "JAVASCRIPT"
+        else -> "CODE"
+    }
+}
+
 private fun copyText(context: android.content.Context, label: String, value: String) {
     val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
@@ -322,10 +418,66 @@ private fun copyText(context: android.content.Context, label: String, value: Str
 }
 
 @Composable
+private fun GenerationProgressCard(
+    busyLabel: String,
+    progress: Float,
+    progressDetail: String,
+    liveDraft: String
+) {
+    var expanded by remember { mutableStateOf(true) }
+    Card(
+        Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Nexora sedang berpikir", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    Text(
+                        busyLabel.ifBlank { "Menyiapkan inference lokal…" },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp
+                    )
+                }
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(if (expanded) "Ciutkan" else "Lihat proses", fontSize = 11.sp)
+                }
+            }
+            if (expanded) {
+                if (progress >= 0f) {
+                    LinearProgressIndicator(
+                        progress = { progress.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+                if (progressDetail.isNotBlank()) {
+                    Text(progressDetail, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
+                }
+                if (liveDraft.isNotBlank()) {
+                    Text("Draf token yang sedang dihasilkan", color = MaterialTheme.colorScheme.primary, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    SelectionContainer {
+                        Text(
+                            liveDraft,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 12.sp,
+                            maxLines = 5,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun MessageCard(message: ChatMessage, chatMode: ChatMode) {
     val isUser = message.role == "user"
     val context = LocalContext.current
-    val parts = remember(message.content) { splitMessageContent(message.content) }
+    val parts = remember(message.content, chatMode) { splitMessageContent(message.content, chatMode) }
     Card(
         Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
