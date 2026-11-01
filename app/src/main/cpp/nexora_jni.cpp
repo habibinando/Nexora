@@ -347,6 +347,12 @@ Java_com_nexora_ai_NativeLlama_loadProgress(JNIEnv *, jobject) {
     return g_load_progress.load(std::memory_order_relaxed);
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_com_nexora_ai_NativeLlama_contextSize(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    return g_context != nullptr ? g_context_size : 0;
+}
+
 extern "C" JNIEXPORT jintArray JNICALL
 Java_com_nexora_ai_NativeLlama_inferenceStats(JNIEnv *env, jobject) {
     const jint values[5] = {
