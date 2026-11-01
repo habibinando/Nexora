@@ -1,7 +1,5 @@
 package com.nexora.ai
 
-private const val MAX_VISION_IMAGE_BYTES = 20 * 1024 * 1024
-
 import android.app.ActivityManager
 import android.content.Context
 import android.net.Uri
@@ -26,6 +24,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.UUID
+
+private const val MAX_VISION_IMAGE_BYTES = 20 * 1024 * 1024
 
 internal data class LocalModel(
     val id: String,
