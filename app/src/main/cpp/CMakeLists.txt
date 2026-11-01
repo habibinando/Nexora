@@ -1,40 +1,40 @@
 cmake_minimum_required(VERSION 3.22.1)
+project(nexora-inference LANGUAGES C CXX)
 
-project("neural_trainer_jni")
-
-# C++20 for modern compiler optimizations & SIMD auto-vectorization
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# High-performance native optimization flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math -funroll-loops -Wall -Wextra")
+option(NEXORA_ENABLE_VULKAN "Build the optional Vulkan backend for compatible Android GPUs" OFF)
 
-# For ARM64 NEON optimization
-if(${ANDROID_ABI} MATCHES "arm64-v8a")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8-a+simd")
-elseif(${ANDROID_ABI} MATCHES "armeabi-v7a")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mfpu=neon -mfloat-abi=softfp")
+include(FetchContent)
+set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_COMMON OFF CACHE BOOL "" FORCE)
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
+set(GGML_BACKEND_DL ON CACHE BOOL "" FORCE)
+set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "" FORCE)
+set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
+if(NEXORA_ENABLE_VULKAN AND ANDROID)
+    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+else()
+    set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
 endif()
 
-add_library(
-    neural_trainer_jni
-    SHARED
-    neural_trainer.cpp
+FetchContent_Declare(
+    llama_cpp
+    GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
+    GIT_TAG 8642541b255bfb5dc39cd351a178be09013a55d6
+    GIT_SHALLOW FALSE
 )
+FetchContent_MakeAvailable(llama_cpp)
 
-find_library(
-    log-lib
-    log
-)
-
-target_link_libraries(
-    neural_trainer_jni
-    ${log-lib}
-)
-
-# 16 KB page size alignment for Android 15+ / 16 KB kernel architecture compatibility
-target_link_options(
-    neural_trainer_jni
-    PRIVATE
-    "-Wl,-z,max-page-size=16384"
-)
+add_library(nexora-inference SHARED nexora_jni.cpp)
+target_compile_options(nexora-inference PRIVATE -O3 -fvisibility=hidden)
+target_link_libraries(nexora-inference PRIVATE llama ggml android log)

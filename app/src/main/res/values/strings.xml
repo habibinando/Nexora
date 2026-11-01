@@ -1,5 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Nexora</string>
-    <string name="firestore_database_id">(default)</string>
-    <string name="default_web_client_id">139731441168-dummy.apps.googleusercontent.com</string>
 </resources>
