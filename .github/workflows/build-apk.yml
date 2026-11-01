@@ -1,10 +1,17 @@
 name: Nexora Android - Build and Verify
 
 on:
-  push:
-    branches: [main, master]
+  # Build once for a PR that changes app/build inputs. Do not run a second
+  # full build merely because the already-tested PR is merged to main.
   pull_request:
     branches: [main, master]
+    paths:
+      - "app/**"
+      - "*.gradle.kts"
+      - "gradle/**"
+      - "gradle.properties"
+      - ".github/workflows/build-apk.yml"
+  # Publish a nightly APK only when explicitly requested from main.
   workflow_dispatch:
 
 permissions:
@@ -78,7 +85,7 @@ jobs:
 
 
       - name: Publish rolling nightly APK
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: nightly
