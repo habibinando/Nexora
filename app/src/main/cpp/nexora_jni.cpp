@@ -29,6 +29,8 @@ int32_t g_thread_count = 0;
 int32_t g_position = 0;
 int32_t g_remaining_tokens = 0;
 bool g_generation_active = false;
+std::atomic<bool> g_cancel_requested{false};
+std::atomic<bool> g_generation_cancelled{false};
 std::string g_system_prompt;
 std::vector<std::pair<std::string, std::string>> g_history;
 // Token IDs in sequence 0, matching the currently populated KV positions.
@@ -75,6 +77,10 @@ int64_t process_peak_rss_bytes() {
     return static_cast<int64_t>(usage.ru_maxrss) * 1024;
 }
 
+bool native_abort_callback(void *) {
+    return g_cancel_requested.load(std::memory_order_relaxed);
+}
+
 bool model_load_progress_callback(float progress, void *) {
     const float safe_progress = std::clamp(progress, 0.0f, 1.0f);
     g_load_progress.store(0.05f + safe_progress * 0.85f, std::memory_order_relaxed);
@@ -86,6 +92,8 @@ void clear_error() { g_last_error.clear(); }
 
 void free_model_locked() {
     g_generation_active = false;
+    g_cancel_requested.store(false, std::memory_order_relaxed);
+    g_generation_cancelled.store(false, std::memory_order_relaxed);
     g_remaining_tokens = 0;
     g_position = 0;
     g_thread_count = 0;
@@ -150,6 +158,11 @@ bool decode_tokens_locked(const std::vector<llama_token> &tokens) {
     g_inference_phase.store(1, std::memory_order_relaxed);
     size_t offset = 0;
     while (offset < tokens.size()) {
+        if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+            g_generation_cancelled.store(true, std::memory_order_relaxed);
+            set_error("Generasi dihentikan oleh pengguna saat memproses prompt.");
+            return false;
+        }
         const int32_t count = static_cast<int32_t>(
             std::min(tokens.size() - offset, static_cast<size_t>(capacity)));
         g_batch.n_tokens = count;
@@ -162,7 +175,17 @@ bool decode_tokens_locked(const std::vector<llama_token> &tokens) {
         }
         const int32_t result = llama_decode(g_context, g_batch);
         if (result != 0) {
-            set_error("llama_decode gagal memproses prompt (kode " + std::to_string(result) + ").");
+            if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+                g_generation_cancelled.store(true, std::memory_order_relaxed);
+                set_error("Generasi dihentikan oleh pengguna saat memproses prompt.");
+            } else {
+                set_error("llama_decode gagal memproses prompt (kode " + std::to_string(result) + ").");
+            }
+            return false;
+        }
+        if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+            g_generation_cancelled.store(true, std::memory_order_relaxed);
+            set_error("Generasi dihentikan oleh pengguna saat memproses prompt.");
             return false;
         }
         g_position += count;
@@ -266,6 +289,31 @@ void finish_generation_locked() {
     g_remaining_tokens = 0;
     g_generation_active = false;
     g_inference_phase.store(0, std::memory_order_relaxed);
+}
+
+void cancel_generation_locked() {
+    g_cancel_requested.store(false, std::memory_order_relaxed);
+    g_generation_cancelled.store(true, std::memory_order_relaxed);
+    set_error("Generasi dihentikan oleh pengguna.");
+
+    if (g_context) llama_memory_clear(llama_get_memory(g_context), true);
+    g_position = 0;
+    g_kv_cache_tokens.clear();
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+
+    if (g_generation_active) {
+        finish_generation_locked();
+    } else {
+        if (!g_pending_user.empty()) {
+            g_history.emplace_back("user", g_pending_user);
+            g_history.emplace_back("assistant", g_pending_response);
+        }
+        g_pending_user.clear();
+        g_pending_response.clear();
+        g_utf8_pending.clear();
+        g_remaining_tokens = 0;
+        g_inference_phase.store(0, std::memory_order_relaxed);
+    }
 }
 
 std::string from_java_string(JNIEnv *env, jstring value) {
@@ -401,6 +449,10 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
         set_error("Gagal mengalokasikan context. Coba model lebih kecil atau context 1024.");
         return -3;
     }
+#if !defined(NEXORA_HAS_VULKAN)
+    // llama.cpp documents this callback as CPU-execution-only.
+    llama_set_abort_callback(g_context, native_abort_callback, nullptr);
+#endif
     g_load_progress.store(0.93f, std::memory_order_relaxed);
 
     if (!projector.empty()) {
@@ -667,6 +719,8 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
                                                  jint max_tokens) {
     std::lock_guard<std::mutex> guard(g_mutex);
     clear_error();
+    g_cancel_requested.store(false, std::memory_order_relaxed);
+    g_generation_cancelled.store(false, std::memory_order_relaxed);
     g_inference_phase.store(0, std::memory_order_relaxed);
     if (!g_model || !g_context || !g_sampler) {
         set_error("Muat model GGUF terlebih dahulu.");
@@ -756,23 +810,39 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
         return -11;
     }
 
+    // Expose a cancellable native phase before MTMD tokenization/encoding starts.
+    g_prompt_total.store(0, std::memory_order_relaxed);
+    g_prompt_processed.store(0, std::memory_order_relaxed);
+    g_inference_phase.store(1, std::memory_order_relaxed);
     const int32_t tokenize_result = mtmd_tokenize_from_parts(
         g_mtmd, chunks, part_ptrs, 3, true
     );
     if (tokenize_result != 0) {
+        const bool was_cancelled = g_cancel_requested.exchange(false, std::memory_order_relaxed);
+        if (was_cancelled) {
+            g_generation_cancelled.store(true, std::memory_order_relaxed);
+            set_error("Analisis vision dihentikan oleh pengguna.");
+        } else {
+            set_error("Preprocessing vision gagal (kode " + std::to_string(tokenize_result) + ").");
+        }
         mtmd_input_chunks_free(chunks);
         mtmd_bitmap_free(bitmap_wrapper.bitmap);
         if (bitmap_wrapper.video_ctx != nullptr) mtmd_helper_video_free(bitmap_wrapper.video_ctx);
-        set_error("Preprocessing vision gagal (kode " + std::to_string(tokenize_result) + ").");
+        g_inference_phase.store(0, std::memory_order_relaxed);
         return -12;
     }
 
     const size_t chunk_count = mtmd_input_chunks_size(chunks);
     g_prompt_total.store(static_cast<int32_t>(chunk_count), std::memory_order_relaxed);
     g_prompt_processed.store(0, std::memory_order_relaxed);
-    g_inference_phase.store(1, std::memory_order_relaxed);
     bool evaluated = chunk_count > 0;
     for (size_t index = 0; evaluated && index < chunk_count; ++index) {
+        if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+            g_generation_cancelled.store(true, std::memory_order_relaxed);
+            set_error("Analisis vision dihentikan oleh pengguna.");
+            evaluated = false;
+            break;
+        }
         const mtmd_input_chunk *chunk = mtmd_input_chunks_get(chunks, index);
         llama_pos next_position = g_position;
         const int32_t result = mtmd_helper_eval_chunk_single(
@@ -780,8 +850,19 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
             index + 1 == chunk_count, &next_position
         );
         if (result != 0) {
-            set_error("Encoder/decode vision gagal pada chunk " + std::to_string(index) +
-                      " (kode " + std::to_string(result) + ").");
+            if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+                g_generation_cancelled.store(true, std::memory_order_relaxed);
+                set_error("Analisis vision dihentikan oleh pengguna.");
+            } else {
+                set_error("Encoder/decode vision gagal pada chunk " + std::to_string(index) +
+                          " (kode " + std::to_string(result) + ").");
+            }
+            evaluated = false;
+            break;
+        }
+        if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+            g_generation_cancelled.store(true, std::memory_order_relaxed);
+            set_error("Analisis vision dihentikan oleh pengguna.");
             evaluated = false;
             break;
         }
@@ -793,12 +874,26 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
     mtmd_bitmap_free(bitmap_wrapper.bitmap);
     if (bitmap_wrapper.video_ctx != nullptr) mtmd_helper_video_free(bitmap_wrapper.video_ctx);
 
+    if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+        g_generation_cancelled.store(true, std::memory_order_relaxed);
+        set_error("Analisis vision dihentikan oleh pengguna.");
+        evaluated = false;
+    }
     if (!evaluated) {
         llama_memory_clear(llama_get_memory(g_context), true);
         g_position = 0;
         g_kv_cache_tokens.clear();
+        g_inference_phase.store(0, std::memory_order_relaxed);
         if (g_last_error.empty()) set_error("Vision tidak menghasilkan chunk multimodal.");
         return -13;
+    }
+
+    if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+        g_generation_cancelled.store(true, std::memory_order_relaxed);
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        set_error("Analisis vision dihentikan oleh pengguna.");
+        return -15;
     }
 
     const int32_t requested_tokens = std::max(1, std::min(1024, static_cast<int32_t>(max_tokens)));
@@ -827,6 +922,8 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
                                             jstring user_message, jint max_tokens) {
     std::lock_guard<std::mutex> guard(g_mutex);
     clear_error();
+    g_cancel_requested.store(false, std::memory_order_relaxed);
+    g_generation_cancelled.store(false, std::memory_order_relaxed);
     g_prompt_cache_reused.store(0, std::memory_order_relaxed);
     g_inference_phase.store(0, std::memory_order_relaxed);
     if (!g_model || !g_context || !g_sampler) {
@@ -880,16 +977,44 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
         g_kv_cache_tokens.clear();
         return -9;
     }
+    g_pending_user = user;
+    g_pending_response.clear();
+    g_utf8_pending.clear();
     if (!decode_tokens_locked(prompt_suffix)) {
+        const bool was_cancelled = g_generation_cancelled.load(std::memory_order_relaxed);
         llama_memory_clear(llama_get_memory(g_context), true);
         g_position = 0;
         g_kv_cache_tokens.clear();
         g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+        if (was_cancelled) {
+            g_history.emplace_back("user", g_pending_user);
+            g_history.emplace_back("assistant", g_pending_response);
+        }
+        g_pending_user.clear();
+        g_pending_response.clear();
+        g_utf8_pending.clear();
+        g_inference_phase.store(0, std::memory_order_relaxed);
         return -9;
     }
     g_kv_cache_tokens.insert(
         g_kv_cache_tokens.end(), prompt_suffix.begin(), prompt_suffix.end()
     );
+
+    if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+        g_generation_cancelled.store(true, std::memory_order_relaxed);
+        set_error("Generasi dihentikan oleh pengguna saat menyiapkan prompt.");
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+        g_history.emplace_back("user", g_pending_user);
+        g_history.emplace_back("assistant", g_pending_response);
+        g_pending_user.clear();
+        g_pending_response.clear();
+        g_utf8_pending.clear();
+        g_inference_phase.store(0, std::memory_order_relaxed);
+        return -11;
+    }
 
     const int32_t available_tokens = std::max(0, g_context_size - g_position - 1);
     const int32_t effective_tokens = std::min(requested_tokens, available_tokens);
@@ -898,14 +1023,14 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
         g_position = 0;
         g_kv_cache_tokens.clear();
         g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+        g_pending_user.clear();
+        g_pending_response.clear();
+        g_utf8_pending.clear();
         set_error("Tidak ada ruang context tersisa untuk menghasilkan token. Mulai chat baru atau pilih context yang lebih besar.");
         return -10;
     }
 
     llama_sampler_reset(g_sampler);
-    g_pending_user = user;
-    g_pending_response.clear();
-    g_utf8_pending.clear();
     g_remaining_tokens = effective_tokens;
     g_generated_tokens.store(0, std::memory_order_relaxed);
     g_generation_limit.store(effective_tokens, std::memory_order_relaxed);
@@ -917,6 +1042,10 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_nexora_ai_NativeLlama_nextToken(JNIEnv *env, jobject) {
     std::lock_guard<std::mutex> guard(g_mutex);
+    if (g_cancel_requested.load(std::memory_order_relaxed)) {
+        cancel_generation_locked();
+        return nullptr;
+    }
     if (!g_generation_active || !g_context || !g_sampler) return nullptr;
     if (g_remaining_tokens <= 0 || g_position >= g_context_size - 1) {
         finish_generation_locked(); return nullptr;
@@ -934,8 +1063,23 @@ Java_com_nexora_ai_NativeLlama_nextToken(JNIEnv *env, jobject) {
     g_batch.logits[0] = 1;
     const int32_t result = llama_decode(g_context, g_batch);
     if (result != 0) {
+        if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+            cancel_generation_locked();
+            return nullptr;
+        }
         set_error("llama_decode gagal saat generasi (kode " + std::to_string(result) + ").");
-        finish_generation_locked(); return nullptr;
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+        finish_generation_locked();
+        return nullptr;
+    }
+    // Vulkan does not use llama.cpp's CPU-only abort callback. Honour Stop
+    // immediately after the currently executing decode call returns.
+    if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+        cancel_generation_locked();
+        return nullptr;
     }
     ++g_position;
     --g_remaining_tokens;
@@ -963,6 +1107,29 @@ Java_com_nexora_ai_NativeLlama_nextToken(JNIEnv *env, jobject) {
     return to_java_string(env, ready);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_nexora_ai_NativeLlama_cancelGeneration(JNIEnv *, jobject) {
+    g_cancel_requested.store(true, std::memory_order_relaxed);
+
+    // Never block the UI behind llama_decode(). If native inference owns the
+    // mutex, CPU builds observe the request through native_abort_callback.
+    std::unique_lock<std::mutex> guard(g_mutex, std::try_to_lock);
+    if (!guard.owns_lock()) return;
+
+    const bool work_active =
+        g_generation_active || g_inference_phase.load(std::memory_order_relaxed) != 0;
+    if (work_active) {
+        cancel_generation_locked();
+    } else {
+        g_cancel_requested.store(false, std::memory_order_relaxed);
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_nexora_ai_NativeLlama_generationWasCancelled(JNIEnv *, jobject) {
+    return g_generation_cancelled.load(std::memory_order_relaxed) ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_nexora_ai_NativeLlama_lastError(JNIEnv *env, jobject) {
     std::lock_guard<std::mutex> guard(g_mutex);
@@ -972,6 +1139,8 @@ Java_com_nexora_ai_NativeLlama_lastError(JNIEnv *env, jobject) {
 extern "C" JNIEXPORT void JNICALL
 Java_com_nexora_ai_NativeLlama_resetChat(JNIEnv *, jobject) {
     std::lock_guard<std::mutex> guard(g_mutex);
+    g_cancel_requested.store(false, std::memory_order_relaxed);
+    g_generation_cancelled.store(false, std::memory_order_relaxed);
     if (g_context) llama_memory_clear(llama_get_memory(g_context), true);
     g_position = 0;
     g_kv_cache_tokens.clear();

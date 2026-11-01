@@ -15,6 +15,8 @@ internal object NativeLlama {
     external fun startVisionPrompt(systemPrompt: String, userMessage: String, imageBytes: ByteArray, maxTokens: Int): Int
     external fun startPrompt(systemPrompt: String, userMessage: String, maxTokens: Int): Int
     external fun nextToken(): String?
+    external fun cancelGeneration()
+    external fun generationWasCancelled(): Boolean
     external fun lastError(): String
     external fun resetChat()
     external fun unload()

@@ -15,11 +15,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -53,6 +55,7 @@ class MainActivity : ComponentActivity() {
     private var chatMode by mutableStateOf(ChatMode.CHAT)
     private var engineReady by mutableStateOf(false)
     private var isBusy by mutableStateOf(false)
+    private var canStopGeneration by mutableStateOf(false)
     private var busyLabel by mutableStateOf("")
     private var busyProgress by mutableStateOf(-1f)
     private var progressDetail by mutableStateOf("")
@@ -101,6 +104,8 @@ class MainActivity : ComponentActivity() {
                     messages = messages,
                     engineReady = engineReady,
                     isBusy = isBusy,
+                    canStopGeneration = canStopGeneration,
+                    onStopGeneration = ::stopGeneration,
                     busyLabel = busyLabel,
                     busyProgress = busyProgress,
                     progressDetail = progressDetail,
@@ -522,6 +527,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun stopGeneration() {
+        if (!canStopGeneration) return
+        NativeLlama.cancelGeneration()
+        canStopGeneration = false
+        busyLabel = getString(R.string.generation_stopping)
+        statusText = getString(R.string.generation_stop_requested)
+    }
+
     private fun analyzeVisionImage(question: String) {
         val trimmed = question.trim()
         val image = visionImageBytes
@@ -545,7 +558,9 @@ class MainActivity : ComponentActivity() {
         progressDetail = "Memproses masukan multimodal di perangkat"
         errorText = null
         visionResult = ""
+        canStopGeneration = false
         lifecycleScope.launch {
+            var nativeWorkSettled = false
             try {
                 val systemPrompt =
                     "You are Nexora Vision, an accurate on-device visual assistant. " +
@@ -557,7 +572,9 @@ class MainActivity : ComponentActivity() {
                     NativeLlama.startVisionPrompt(systemPrompt, trimmed, image, 512)
                 }
                 while (!visionTask.isCompleted) {
-                    updateInferenceProgress(NativeLlama.inferenceStats(), startedAt, "Memproses input vision")
+                    val stats = NativeLlama.inferenceStats()
+                    if ((stats.getOrNull(0) ?: 0) != 0) canStopGeneration = true
+                    updateInferenceProgress(stats, startedAt, "Memproses input vision")
                     delay(80)
                 }
                 val result = visionTask.await()
@@ -566,6 +583,7 @@ class MainActivity : ComponentActivity() {
                     error("Vision gagal dimulai (kode $result). $detail")
                 }
 
+                canStopGeneration = true
                 val output = StringBuilder()
                 while (true) {
                     val token = withContext(Dispatchers.IO) { NativeLlama.nextToken() } ?: break
@@ -574,23 +592,44 @@ class MainActivity : ComponentActivity() {
                     updateInferenceProgress(NativeLlama.inferenceStats(), startedAt, "Menghasilkan jawaban vision")
                 }
 
+                nativeWorkSettled = true
+                val wasCancelled = withContext(Dispatchers.IO) { NativeLlama.generationWasCancelled() }
                 val generationError = withContext(Dispatchers.IO) { NativeLlama.lastError() }
-                if (generationError.isNotBlank()) errorText = generationError
+                if (generationError.isNotBlank() && !wasCancelled) errorText = generationError
                 if (output.isEmpty()) {
-                    visionResult = if (generationError.isBlank()) {
-                        "Model tidak menghasilkan jawaban untuk gambar ini."
-                    } else {
-                        "Analisis gagal: $generationError"
+                    visionResult = when {
+                        wasCancelled -> getString(R.string.generation_stopped_no_output)
+                        generationError.isBlank() -> "Model tidak menghasilkan jawaban untuk gambar ini."
+                        else -> "Analisis gagal: $generationError"
                     }
                 }
-                busyProgress = 1f
-                busyLabel = "Analisis gambar selesai"
+                busyProgress = if (wasCancelled) 0f else 1f
+                busyLabel = if (wasCancelled) getString(R.string.generation_stopped) else "Analisis gambar selesai"
                 progressDetail = "Token output aktual: ${NativeLlama.inferenceStats().getOrNull(3) ?: 0}"
-                statusText = "Analisis gambar selesai secara lokal."
+                statusText = if (wasCancelled) getString(R.string.generation_stopped) else "Analisis gambar selesai secara lokal."
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Throwable) {
-                errorText = error.message ?: "Analisis vision gagal."
-                if (visionResult.isBlank()) visionResult = "Analisis gagal. Periksa pesan kesalahan."
+                val wasCancelled = withContext(Dispatchers.IO) {
+                    NativeLlama.generationWasCancelled()
+                }
+                if (wasCancelled) {
+                    visionResult = visionResult.ifBlank {
+                        getString(R.string.generation_stopped_no_output)
+                    }
+                    statusText = getString(R.string.generation_stopped)
+                } else {
+                    errorText = error.message ?: "Analisis vision gagal."
+                    if (visionResult.isBlank()) visionResult = "Analisis gagal. Periksa pesan kesalahan."
+                }
             } finally {
+                if (!nativeWorkSettled) {
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        NativeLlama.cancelGeneration()
+                        NativeLlama.nextToken()
+                    }
+                }
+                canStopGeneration = false
                 isBusy = false
                 busyLabel = ""
                 busyProgress = -1f
@@ -843,8 +882,10 @@ class MainActivity : ComponentActivity() {
         busyProgress = 0f
         progressDetail = "Token input dan output dihitung dari backend native"
         errorText = null
+        canStopGeneration = false
 
         lifecycleScope.launch {
+            var nativeWorkSettled = false
             try {
                 val systemPrompt = when (chatMode) {
                     ChatMode.CHAT ->
@@ -862,7 +903,9 @@ class MainActivity : ComponentActivity() {
                     NativeLlama.startPrompt(systemPrompt, trimmed, maxOutputTokens)
                 }
                 while (!promptTask.isCompleted) {
-                    updateInferenceProgress(NativeLlama.inferenceStats(), startedAt, "Memproses prompt")
+                    val stats = NativeLlama.inferenceStats()
+                    if ((stats.getOrNull(0) ?: 0) != 0) canStopGeneration = true
+                    updateInferenceProgress(stats, startedAt, "Memproses prompt")
                     delay(80)
                 }
 
@@ -872,6 +915,7 @@ class MainActivity : ComponentActivity() {
                     error("Prompt ditolak (kode $result). $detail")
                 }
 
+                canStopGeneration = true
                 val outputText = withContext(Dispatchers.IO) {
                     val output = StringBuilder()
                     var lastUiUpdate = SystemClock.elapsedRealtime()
@@ -904,33 +948,56 @@ class MainActivity : ComponentActivity() {
                     complete
                 }
 
+                nativeWorkSettled = true
+                val wasCancelled = withContext(Dispatchers.IO) { NativeLlama.generationWasCancelled() }
                 val generationError = withContext(Dispatchers.IO) { NativeLlama.lastError() }
                 val finalStats = NativeLlama.inferenceStats()
                 val producedTokens = finalStats.getOrNull(3) ?: 0
                 val effectiveLimit = finalStats.getOrNull(4) ?: maxOutputTokens
                 val finalContent = when {
                     outputText.isNotEmpty() -> outputText
+                    wasCancelled -> getString(R.string.generation_stopped_no_output)
                     generationError.isNotBlank() -> "Generasi berhenti: $generationError"
                     else -> "Model tidak menghasilkan teks untuk prompt ini."
                 }
                 messages.add(ChatMessage("assistant", finalContent))
                 generationPreview = ""
-                if (generationError.isNotBlank()) errorText = generationError
-                busyProgress = 1f
-                busyLabel = "Inference selesai"
+                if (generationError.isNotBlank() && !wasCancelled) errorText = generationError
+                busyProgress = if (wasCancelled) 0f else 1f
+                busyLabel = if (wasCancelled) getString(R.string.generation_stopped) else "Inference selesai"
                 progressDetail = "Token output aktual: $producedTokens"
-                statusText = if (effectiveLimit < maxOutputTokens) {
-                    "Inference selesai secara lokal. Output dibatasi oleh sisa context: $effectiveLimit dari $maxOutputTokens token yang diminta."
-                } else {
-                    "Inference selesai secara lokal."
+                statusText = when {
+                    wasCancelled -> getString(R.string.generation_stopped)
+                    effectiveLimit < maxOutputTokens ->
+                        "Inference selesai secara lokal. Output dibatasi oleh sisa context: $effectiveLimit dari $maxOutputTokens token yang diminta."
+                    else -> "Inference selesai secara lokal."
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Throwable) {
-                if (messages.lastOrNull()?.role == "user") {
-                    messages.add(ChatMessage("assistant", "Generasi gagal. Periksa pesan kesalahan."))
+                val wasCancelled = withContext(Dispatchers.IO) {
+                    NativeLlama.generationWasCancelled()
+                }
+                if (wasCancelled) {
+                    if (messages.lastOrNull()?.role == "user") {
+                        messages.add(ChatMessage("assistant", getString(R.string.generation_stopped_no_output)))
+                    }
+                    statusText = getString(R.string.generation_stopped)
+                } else {
+                    if (messages.lastOrNull()?.role == "user") {
+                        messages.add(ChatMessage("assistant", "Generasi gagal. Periksa pesan kesalahan."))
+                    }
+                    errorText = error.message ?: "Inference gagal."
                 }
                 generationPreview = ""
-                errorText = error.message ?: "Inference gagal."
             } finally {
+                if (!nativeWorkSettled) {
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        NativeLlama.cancelGeneration()
+                        NativeLlama.nextToken()
+                    }
+                }
+                canStopGeneration = false
                 isBusy = false
                 busyLabel = ""
                 busyProgress = -1f

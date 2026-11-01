@@ -75,6 +75,8 @@ internal fun NexoraScreen(
     messages: List<ChatMessage>,
     engineReady: Boolean,
     isBusy: Boolean,
+    canStopGeneration: Boolean,
+    onStopGeneration: () -> Unit,
     busyLabel: String,
     busyProgress: Float,
     progressDetail: String,
@@ -136,6 +138,8 @@ internal fun NexoraScreen(
                         models = models,
                         chatMode = chatMode,
                         isBusy = isBusy,
+                        canStopGeneration = canStopGeneration,
+                        onStopGeneration = onStopGeneration,
                         busyLabel = busyLabel,
                         busyProgress = busyProgress,
                         progressDetail = progressDetail,
@@ -170,7 +174,7 @@ internal fun NexoraScreen(
                     )
                     AppPage.VISION -> VisionPage(
                         visionReady, visionImageName, visionResult, isVisionImageSelected,
-                        isBusy, onPickVisionImage, onAnalyzeVision
+                        isBusy, canStopGeneration, onStopGeneration, onPickVisionImage, onAnalyzeVision
                     )
                 }
             }
@@ -272,6 +276,8 @@ private fun ChatPage(
     models: List<LocalModel>,
     chatMode: ChatMode,
     isBusy: Boolean,
+    canStopGeneration: Boolean,
+    onStopGeneration: () -> Unit,
     busyLabel: String,
     busyProgress: Float,
     progressDetail: String,
@@ -361,6 +367,14 @@ private fun ChatPage(
                 progressDetail = progressDetail,
                 liveDraft = generationPreview
             )
+            if (canStopGeneration) {
+                TextButton(
+                    onClick = onStopGeneration,
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text(stringResource(R.string.generation_stop))
+                }
+            }
             Spacer(Modifier.height(10.dp))
         }
 
@@ -733,6 +747,8 @@ private fun VisionPage(
     result: String,
     imageSelected: Boolean,
     isBusy: Boolean,
+    canStopGeneration: Boolean,
+    onStopGeneration: () -> Unit,
     onPickImage: () -> Unit,
     onAnalyze: (String) -> Unit
 ) {
@@ -783,6 +799,14 @@ private fun VisionPage(
                 shape = RoundedCornerShape(14.dp)
             ) {
                 Text(if (isBusy) "Menganalisis…" else "Analisis Gambar")
+            }
+            if (canStopGeneration) {
+                TextButton(
+                    onClick = onStopGeneration,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(stringResource(R.string.generation_stop))
+                }
             }
             if (result.isNotBlank()) {
                 InfoCard("Hasil analisis lokal", result)

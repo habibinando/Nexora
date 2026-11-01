@@ -30,6 +30,11 @@ Peak RSS proses: %16$s</string>
     <string name="benchmark_stop_output_limit">Batas output 128 token tercapai.</string>
     <string name="benchmark_stop_context">Ruang context habis sebelum target output tercapai.</string>
     <string name="benchmark_stop_output_and_context">Batas output 128 token dan kapasitas context tercapai bersamaan.</string>
+    <string name="generation_stop">Hentikan generasi</string>
+    <string name="generation_stopping">Menghentikan generasi…</string>
+    <string name="generation_stop_requested">Permintaan penghentian dikirim ke backend native.</string>
+    <string name="generation_stopped">Generasi dihentikan. Jawaban parsial disimpan.</string>
+    <string name="generation_stopped_no_output">Generasi dihentikan sebelum menghasilkan teks.</string>
     <string name="benchmark_prefill_progress">%1$d / %2$d token prompt diproses</string>
     <string name="prompt_cache_reuse_progress">%1$d token prefix dipakai ulang dari KV cache; hanya suffix prompt diproses ulang.</string>
     <string name="benchmark_decode_progress">%1$d / %2$d token output diproses</string>

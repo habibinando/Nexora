@@ -9,9 +9,11 @@
 - Branch pekerjaan: `audit/fase-0-baseline`
 - Commit dasar `main`: `8e329c661f83d2a5023d0d9c73ef7d423938d377`
 - Commit branch sebelum audit koreksi ini: `6c202f0cc18842be78842758fdc76cc0b76d8715`
-- Fase aktif: **Fase 1 — K1 (release build dan distribusi APK)**
-- B0: instrumentasi tersedia; pengukuran perangkat nyata belum tersedia dan tidak diklaim selesai
+- Fase aktif: **Fase 1 — K3 (Stop generation)**
+- B0: instrumentasi tersedia; pengukuran perangkat ARM64 nyata belum tersedia dan tidak diklaim selesai
 - K1: **SUCCESS** — CI `41328386105` lulus untuk unit test, debug/release APK, signature, ARM64 libraries, R8 mapping, CMake Release dan native `-O3`
+- K2: **SUCCESS** — CI `41329301158` lulus untuk unit test, debug/release APK, signature, ARM64 libraries, R8 mapping, CMake Release dan native `-O3`
+- K3: implementasi native/UI terintegrasi; menunggu CI gabungan
 
 ## Riwayat yang dipertahankan
 
@@ -163,3 +165,21 @@ Perubahan koreksi ini hanya menyentuh instrumentasi benchmark B0, metadata/penya
 - API `llama_memory_seq_rm` telah diperiksa terhadap `include/llama.h` commit pinned; signature dan semantics [p0, p1) cocok.
 - K1 CI telah selesai sukses; K2 menjadi commit lanjutan pada branch yang sama dan dijalankan dengan satu CI terintegrasi.
 - Identitas output greedy antara mode cached dan no-cache serta manfaat waktu prefill perlu validasi dengan model nyata; belum diklaim teruji tanpa runtime GGUF.
+
+
+## Fase 1 — K3: Stop generation dan pembatalan native
+
+### Implementasi pada commit K3
+- JNI `cancelGeneration()` mengatur atomic request dan memakai `try_lock`; UI tidak menunggu mutex ketika llama.cpp sedang decode.
+- Build CPU memasang `llama_set_abort_callback()` pada context sesuai API pinned yang hanya menjamin callback untuk CPU execution. Phase native diaktifkan sebelum tokenisasi/encoding MTMD agar tombol Stop dapat muncul sejak pemrosesan gambar dimulai.
+- Prefill batch, evaluasi chunk MTMD vision, dan decode token memeriksa cancellation request pada batas operasi.
+- Jika CPU abort callback menghentikan `llama_decode()`, jalur native membedakan pembatalan dari decode error biasa.
+- Jika generasi output dihentikan, token yang sudah berhasil didecode dipertahankan sebagai jawaban parsial di native history; KV dan cache token dibersihkan dan posisi diselaraskan.
+- Jika prefill dihentikan sebelum output dimulai, pesan pengguna tetap disimpan ke native history dengan jawaban parsial kosong.
+- JNI `generationWasCancelled()` membedakan Stop dari EOS/error; UI menampilkan tombol Hentikan hanya ketika native phase aktif.
+- Coroutine cleanup menggunakan `NonCancellable + Dispatchers.IO` untuk membatalkan native generation bila coroutine dibatalkan.
+
+### Verifikasi / batas
+- Header pinned `llama.h` dan callback ggml telah diperiksa; API abort callback memang CPU-only.
+- CI K3 akan memeriksa compile, unit test, pairing JNI dan debug/release APK.
+- Perilaku Stop saat runtime inference tetap memerlukan smoke test dengan GGUF. Build Vulkan tidak mengklaim abort callback di tengah kernel; pembatalan Vulkan dilakukan pada batas decode/token setelah operasi berjalan kembali.
