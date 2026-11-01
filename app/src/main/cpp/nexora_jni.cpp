@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <sys/resource.h>
@@ -14,6 +15,7 @@
 #include <vector>
 
 namespace {
+constexpr int32_t kInferenceBatchCapacity = 256;
 std::mutex g_mutex;
 bool g_backend_initialized = false;
 llama_model *g_model = nullptr;
@@ -29,6 +31,8 @@ int32_t g_remaining_tokens = 0;
 bool g_generation_active = false;
 std::string g_system_prompt;
 std::vector<std::pair<std::string, std::string>> g_history;
+// Token IDs in sequence 0, matching the currently populated KV positions.
+std::vector<llama_token> g_kv_cache_tokens;
 std::string g_pending_user, g_pending_response, g_utf8_pending, g_last_error;
 std::atomic<float> g_load_progress{-1.0f};
 std::atomic<int32_t> g_inference_phase{0}; // 0 idle, 1 input/prefill, 2 token generation
@@ -36,6 +40,7 @@ std::atomic<int32_t> g_prompt_processed{0};
 std::atomic<int32_t> g_prompt_total{0};
 std::atomic<int32_t> g_generated_tokens{0};
 std::atomic<int32_t> g_generation_limit{0};
+std::atomic<int32_t> g_prompt_cache_reused{0};
 std::atomic<int64_t> g_last_load_duration_ns{0};
 
 constexpr int64_t kBenchmarkStopEos = 1LL << 0;
@@ -85,6 +90,8 @@ void free_model_locked() {
     g_position = 0;
     g_thread_count = 0;
     g_history.clear();
+    g_kv_cache_tokens.clear();
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
     g_pending_user.clear();
     g_pending_response.clear();
     g_utf8_pending.clear();
@@ -137,7 +144,7 @@ std::vector<llama_token> tokenize_locked(const std::string &text) {
 
 bool decode_tokens_locked(const std::vector<llama_token> &tokens) {
     if (!g_context || !g_batch_initialized) { set_error("Model belum dimuat."); return false; }
-    constexpr int32_t capacity = 32;
+    constexpr int32_t capacity = kInferenceBatchCapacity;
     g_prompt_processed.store(0, std::memory_order_relaxed);
     g_prompt_total.store(static_cast<int32_t>(tokens.size()), std::memory_order_relaxed);
     g_inference_phase.store(1, std::memory_order_relaxed);
@@ -163,6 +170,54 @@ bool decode_tokens_locked(const std::vector<llama_token> &tokens) {
         g_prompt_processed.store(static_cast<int32_t>(offset), std::memory_order_relaxed);
     }
     return true;
+}
+
+size_t common_prefix_length(
+    const std::vector<llama_token> &cached,
+    const std::vector<llama_token> &incoming
+) {
+    const size_t limit = std::min(cached.size(), incoming.size());
+    size_t common = 0;
+    while (common < limit && cached[common] == incoming[common]) ++common;
+    return common;
+}
+
+// Reuse only a prefix represented by the saved token IDs in KV sequence 0.
+// Re-evaluate at least the final prompt token so the sampler has fresh logits.
+size_t prepare_prompt_kv_locked(const std::vector<llama_token> &tokens) {
+    if (!g_context || tokens.empty()) return 0;
+
+    const size_t common = common_prefix_length(g_kv_cache_tokens, tokens);
+    const size_t reusable = std::min(common, tokens.size() - 1);
+    llama_memory_t memory = llama_get_memory(g_context);
+
+    if (reusable == 0) {
+        llama_memory_clear(memory, true);
+        g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+        return 0;
+    }
+
+    if (reusable < g_kv_cache_tokens.size()) {
+        const bool removed = llama_memory_seq_rm(
+            memory, 0, static_cast<llama_pos>(reusable), -1
+        );
+        if (!removed) {
+            // Some architectures cannot remove a partial sequence. Clear all KV
+            // rather than let token IDs and KV positions silently diverge.
+            llama_memory_clear(memory, true);
+            g_position = 0;
+            g_kv_cache_tokens.clear();
+            g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+            return 0;
+        }
+        g_kv_cache_tokens.resize(reusable);
+    }
+
+    g_position = static_cast<int32_t>(reusable);
+    g_prompt_cache_reused.store(static_cast<int32_t>(reusable), std::memory_order_relaxed);
+    return reusable;
 }
 
 std::string format_prompt_locked(const std::string &user_message) {
@@ -333,8 +388,8 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
 
     llama_context_params params = llama_context_default_params();
     params.n_ctx = static_cast<uint32_t>(g_context_size);
-    params.n_batch = 256;
-    params.n_ubatch = 128;
+    params.n_batch = kInferenceBatchCapacity;
+    params.n_ubatch = kInferenceBatchCapacity;
     params.n_seq_max = 1;
     const int32_t effective_thread_count = std::max(1, static_cast<int32_t>(thread_count));
     params.n_threads = effective_thread_count;
@@ -364,7 +419,7 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     }
     g_load_progress.store(0.96f, std::memory_order_relaxed);
 
-    g_batch = llama_batch_init(256, 0, 1);
+    g_batch = llama_batch_init(kInferenceBatchCapacity, 0, 1);
     g_batch_initialized = true;
     g_sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
     if (!g_sampler) {
@@ -401,15 +456,16 @@ Java_com_nexora_ai_NativeLlama_contextSize(JNIEnv *, jobject) {
 
 extern "C" JNIEXPORT jintArray JNICALL
 Java_com_nexora_ai_NativeLlama_inferenceStats(JNIEnv *env, jobject) {
-    const jint values[5] = {
+    const jint values[6] = {
         g_inference_phase.load(std::memory_order_relaxed),
         g_prompt_processed.load(std::memory_order_relaxed),
         g_prompt_total.load(std::memory_order_relaxed),
         g_generated_tokens.load(std::memory_order_relaxed),
-        g_generation_limit.load(std::memory_order_relaxed)
+        g_generation_limit.load(std::memory_order_relaxed),
+        g_prompt_cache_reused.load(std::memory_order_relaxed)
     };
-    jintArray result = env->NewIntArray(5);
-    if (result != nullptr) env->SetIntArrayRegion(result, 0, 5, values);
+    jintArray result = env->NewIntArray(6);
+    if (result != nullptr) env->SetIntArrayRegion(result, 0, 6, values);
     return result;
 }
 
@@ -455,6 +511,8 @@ Java_com_nexora_ai_NativeLlama_runBenchmark(JNIEnv *env, jobject, jstring prompt
     auto restore_conversation = [&]() {
         llama_memory_clear(llama_get_memory(g_context), true);
         g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
         g_history = std::move(saved_history);
         g_system_prompt = saved_system_prompt;
         g_generation_active = saved_generation_active;
@@ -472,6 +530,8 @@ Java_com_nexora_ai_NativeLlama_runBenchmark(JNIEnv *env, jobject, jstring prompt
 
     llama_memory_clear(llama_get_memory(g_context), true);
     g_position = 0;
+    g_kv_cache_tokens.clear();
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
     g_history.clear();
     g_system_prompt = "You are running a fixed on-device inference benchmark. Answer in Indonesian.";
     g_pending_user.clear();
@@ -649,6 +709,8 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
     // Image turns are one-shot: their embeddings are not persisted in text history.
     llama_memory_clear(llama_get_memory(g_context), true);
     g_position = 0;
+    g_kv_cache_tokens.clear();
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
     g_history.clear();
     g_system_prompt = next_system;
 
@@ -734,6 +796,7 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
     if (!evaluated) {
         llama_memory_clear(llama_get_memory(g_context), true);
         g_position = 0;
+        g_kv_cache_tokens.clear();
         if (g_last_error.empty()) set_error("Vision tidak menghasilkan chunk multimodal.");
         return -13;
     }
@@ -742,6 +805,7 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
     if (g_position + requested_tokens >= g_context_size) {
         llama_memory_clear(llama_get_memory(g_context), true);
         g_position = 0;
+        g_kv_cache_tokens.clear();
         set_error("Gambar dan prompt terlalu besar untuk context model ini.");
         return -14;
     }
@@ -763,6 +827,7 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
                                             jstring user_message, jint max_tokens) {
     std::lock_guard<std::mutex> guard(g_mutex);
     clear_error();
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
     g_inference_phase.store(0, std::memory_order_relaxed);
     if (!g_model || !g_context || !g_sampler) {
         set_error("Impor dan muat model GGUF terlebih dahulu."); return -1;
@@ -777,14 +842,15 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
 
     if (next_system != g_system_prompt) {
         g_history.clear();
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
         g_system_prompt = next_system;
     }
 
-    // Chat templates render the complete transcript. Rebuild the KV cache from
-    // that transcript on every turn so previous tokens are never appended twice.
-    llama_memory_clear(llama_get_memory(g_context), true);
-    g_position = 0;
-
+    // Render the full transcript, then reuse only the exact token prefix already
+    // represented in sequence 0 and evaluate the remaining suffix.
     const std::string formatted = format_prompt_locked(user);
     if (formatted.empty()) {
         if (g_last_error.empty()) set_error("Prompt kosong setelah pemformatan.");
@@ -801,17 +867,37 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
         set_error("Prompt melebihi context model. Kurangi panjang pesan atau gunakan context yang lebih besar.");
         return -8;
     }
-    if (!decode_tokens_locked(tokens)) {
+
+    const size_t reused_tokens = prepare_prompt_kv_locked(tokens);
+    const std::vector<llama_token> prompt_suffix(
+        tokens.begin() + static_cast<std::ptrdiff_t>(reused_tokens),
+        tokens.end()
+    );
+    if (prompt_suffix.empty()) {
+        set_error("Cache prompt tidak menyisakan token untuk menyiapkan logits.");
         llama_memory_clear(llama_get_memory(g_context), true);
         g_position = 0;
+        g_kv_cache_tokens.clear();
         return -9;
     }
+    if (!decode_tokens_locked(prompt_suffix)) {
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+        return -9;
+    }
+    g_kv_cache_tokens.insert(
+        g_kv_cache_tokens.end(), prompt_suffix.begin(), prompt_suffix.end()
+    );
 
     const int32_t available_tokens = std::max(0, g_context_size - g_position - 1);
     const int32_t effective_tokens = std::min(requested_tokens, available_tokens);
     if (effective_tokens <= 0) {
         llama_memory_clear(llama_get_memory(g_context), true);
         g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
         set_error("Tidak ada ruang context tersisa untuk menghasilkan token. Mulai chat baru atau pilih context yang lebih besar.");
         return -10;
     }
@@ -853,6 +939,7 @@ Java_com_nexora_ai_NativeLlama_nextToken(JNIEnv *env, jobject) {
     }
     ++g_position;
     --g_remaining_tokens;
+    g_kv_cache_tokens.push_back(token);
     g_generated_tokens.fetch_add(1, std::memory_order_relaxed);
 
     char piece[256];
@@ -887,6 +974,8 @@ Java_com_nexora_ai_NativeLlama_resetChat(JNIEnv *, jobject) {
     std::lock_guard<std::mutex> guard(g_mutex);
     if (g_context) llama_memory_clear(llama_get_memory(g_context), true);
     g_position = 0;
+    g_kv_cache_tokens.clear();
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
     g_history.clear();
     g_generation_active = false;
     g_pending_user.clear();

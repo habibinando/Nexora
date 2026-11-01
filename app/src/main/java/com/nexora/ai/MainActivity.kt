@@ -772,7 +772,8 @@ class MainActivity : ComponentActivity() {
                 val ratio = if (inputTotal > 0) inputProcessed.toFloat() / inputTotal else 0f
                 busyProgress = (ratio.coerceIn(0f, 1f) * 0.2f).coerceIn(0f, 0.2f)
                 busyLabel = "$inputLabel: $inputProcessed / $inputTotal"
-                progressDetail = "Token input yang sudah diproses backend native"
+                val reused = stats.getOrNull(5)?.coerceAtLeast(0) ?: 0
+                progressDetail = getString(R.string.prompt_cache_reuse_progress, reused)
             }
             2 -> {
                 val ratio = if (target > 0) generated.toFloat() / target else 0f

@@ -11,7 +11,7 @@
 - Commit branch sebelum audit koreksi ini: `6c202f0cc18842be78842758fdc76cc0b76d8715`
 - Fase aktif: **Fase 1 — K1 (release build dan distribusi APK)**
 - B0: instrumentasi tersedia; pengukuran perangkat nyata belum tersedia dan tidak diklaim selesai
-- K1: implementasi konfigurasi release sedang diverifikasi oleh CI
+- K1: **SUCCESS** — CI `41328386105` lulus untuk unit test, debug/release APK, signature, ARM64 libraries, R8 mapping, CMake Release dan native `-O3`
 
 ## Riwayat yang dipertahankan
 
@@ -141,7 +141,25 @@ Perubahan koreksi ini hanya menyentuh instrumentasi benchmark B0, metadata/penya
 - APK PR diterbitkan sebagai prerelease GitHub Release untuk unduhan langsung. Tidak menggunakan Actions artifact upload.
 
 ### Batas verifikasi
-- Run CI untuk commit K1 ini harus lulus sebelum APK hasilnya dianggap tersedia.
-- Bila secret signing belum dipasang, APK release tetap bisa diuji tetapi akan menggunakan debug key.
-- Distribusi Play Store, signing key permanen, dan pengujian install/update pada perangkat tetap memerlukan pemeriksaan terpisah.
+- CI [41328386105](https://github.com/habibinando/Nexora/actions/runs/41328386105) **SUCCESS**. Unit tests, debug + release builds, signature verification, ABI ARM64, R8 mapping, CMakeCache `CMAKE_BUILD_TYPE=Release`, dan compile command JNI `-O3` telah diverifikasi.
+- Release signing secrets belum lengkap; kedua APK menggunakan Android Debug certificate. Kunci release permanen perlu dikonfigurasi agar pembaruan lintas-build dapat dipasang tanpa konflik tanda tangan.
+- Kedua APK tersedia pada [GitHub Release pr-5-latest](https://github.com/habibinando/Nexora/releases/tag/pr-5-latest). Distribusi Play Store dan uji install/update tetap memerlukan signing key permanen.
 - B0 belum mempunyai angka prefill/decode/load/RSS dari perangkat ARM64 nyata. Status tersebut tetap tercatat; CI tidak dianggap sebagai pengganti benchmark perangkat.
+
+
+## Fase 1 — K2: Prefill batching dan KV prefix reuse
+
+### Implementasi pada commit K2
+- Kapasitas batch terpusat di `kInferenceBatchCapacity = 256`; `n_batch`, `n_ubatch`, batch allocation, dan chunking prompt menggunakan kapasitas 256.
+- Cache token menyimpan urutan token yang benar-benar dievaluasi di sequence 0.
+- Setiap prompt baru dibandingkan dengan cache token untuk menemukan common prefix; suffix lama dipangkas melalui `llama_memory_seq_rm(memory, 0, keep, -1)`.
+- Bila penghapusan parsial gagal, memory dibersihkan penuh dan seluruh prompt diproses ulang.
+- Satu token prompt terakhir selalu dievaluasi ulang untuk memastikan logits valid tersedia bagi sampler.
+- Token output yang berhasil melewati `llama_decode` ditambahkan ke cache; token EOS tidak ditambahkan karena tidak masuk KV.
+- Cache teks dibatalkan pada perubahan system prompt, reset/unload, benchmark, dan jalur vision agar posisi embedding multimodal tidak salah dianggap token teks.
+- Progress inference melaporkan jumlah prefix token yang benar-benar digunakan ulang dari native.
+
+### Verifikasi / batas
+- API `llama_memory_seq_rm` telah diperiksa terhadap `include/llama.h` commit pinned; signature dan semantics [p0, p1) cocok.
+- K1 CI telah selesai sukses; K2 menjadi commit lanjutan pada branch yang sama dan dijalankan dengan satu CI terintegrasi.
+- Identitas output greedy antara mode cached dan no-cache serta manfaat waktu prefill perlu validasi dengan model nyata; belum diklaim teruji tanpa runtime GGUF.
