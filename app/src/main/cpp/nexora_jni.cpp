@@ -366,7 +366,7 @@ Java_com_nexora_ai_NativeLlama_nextToken(JNIEnv *env, jobject) {
     char piece[256];
     int32_t size = llama_token_to_piece(vocab, token, piece, sizeof(piece), 0, false);
     if (size < 0) {
-        std::string extended(static_cast<size_t>(-size), '\\0');
+        std::string extended(static_cast<size_t>(-size), char{0});
         size = llama_token_to_piece(vocab, token, extended.data(),
                                     static_cast<int32_t>(extended.size()), 0, false);
         if (size < 0) {
