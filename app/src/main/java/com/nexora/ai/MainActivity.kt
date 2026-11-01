@@ -56,6 +56,8 @@ class MainActivity : ComponentActivity() {
     private var busyLabel by mutableStateOf("")
     private var busyProgress by mutableStateOf(-1f)
     private var progressDetail by mutableStateOf("")
+    private var maxOutputTokens by mutableStateOf(4096)
+    private var generationPreview by mutableStateOf("")
     private var statusText by mutableStateOf("Menyiapkan runtime lokal…")
     private var systemInfo by mutableStateOf("Backend belum diinisialisasi.")
     private var hardwareInfo by mutableStateOf("Memeriksa perangkat…")
@@ -85,6 +87,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         loadModelIndex()
         hardwareInfo = readHardwareInfo()
+        maxOutputTokens = getSharedPreferences("nexora_settings", MODE_PRIVATE)
+            .getInt("max_output_tokens", 4096).coerceIn(1, 100000)
 
         setContent {
             NexoraTheme {
@@ -99,6 +103,9 @@ class MainActivity : ComponentActivity() {
                     busyLabel = busyLabel,
                     busyProgress = busyProgress,
                     progressDetail = progressDetail,
+                    generationPreview = generationPreview,
+                    maxOutputTokens = maxOutputTokens,
+                    onMaxOutputTokensChange = ::updateMaxOutputTokens,
                     statusText = statusText,
                     errorText = errorText,
                     systemInfo = systemInfo,
@@ -320,8 +327,16 @@ class MainActivity : ComponentActivity() {
                     error("File mmproj tidak ditemukan. Impor ulang projector vision untuk model ini.")
                 }
                 val threads = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(2, 6)
+                val memoryHeadroom = (memory.availMem - estimatedNeed).coerceAtLeast(0L)
+                val requestedContext = when {
+                    memoryHeadroom >= 2L * 1024L * 1024L * 1024L -> 32768
+                    memoryHeadroom >= 1024L * 1024L * 1024L -> 16384
+                    memoryHeadroom >= 512L * 1024L * 1024L -> 8192
+                    else -> 4096
+                }
+                progressDetail = "Menyiapkan context hingga $requestedContext token berdasarkan RAM tersedia"
                 val loadTask = async(Dispatchers.IO) {
-                    NativeLlama.loadModel(file.absolutePath, projectorPath, 2048, threads)
+                    NativeLlama.loadModel(file.absolutePath, projectorPath, requestedContext, threads)
                 }
                 while (!loadTask.isCompleted) {
                     val nativeProgress = NativeLlama.loadProgress()
@@ -338,17 +353,17 @@ class MainActivity : ComponentActivity() {
                     error("Gagal memuat model (kode $result). $detail")
                 }
                 busyProgress = 1f
-                progressDetail = "Model, context, dan sampler siap"
+                val activeContextSize = withContext(Dispatchers.IO) { NativeLlama.contextSize() }
+                progressDetail = "Model dan sampler siap · Context aktual ${activeContextSize.coerceAtLeast(0)} token"
                 activeModelId = model.id
                 visionSupported = withContext(Dispatchers.IO) { NativeLlama.hasVision() }
                 visionImageBytes = null
                 visionImageName = null
                 messages.clear()
                 visionResult = ""
-                statusText = if (visionSupported) {
-                    "Model aktif: ${model.name} · Vision siap"
-                } else {
-                    "Model aktif: ${model.name}"
+                statusText = buildString {
+                    append("Model aktif: ${model.name} · Context ${activeContextSize.coerceAtLeast(0)} token")
+                    if (visionSupported) append(" · Vision siap")
                 }
             } catch (error: Throwable) {
                 activeModelId = null
@@ -638,6 +653,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun updateMaxOutputTokens(value: Int) {
+        val safeValue = value.coerceIn(1, 100000)
+        maxOutputTokens = safeValue
+        getSharedPreferences("nexora_settings", MODE_PRIVATE)
+            .edit().putInt("max_output_tokens", safeValue).apply()
+    }
+
     private fun sendMessage(message: String) {
         val trimmed = message.trim()
         if (trimmed.isEmpty() || isBusy) return
@@ -648,7 +670,7 @@ class MainActivity : ComponentActivity() {
         }
 
         messages.add(ChatMessage("user", trimmed))
-        messages.add(ChatMessage("assistant", ""))
+        generationPreview = ""
         isBusy = true
         busyLabel = "Menyiapkan prompt…"
         busyProgress = 0f
@@ -663,12 +685,14 @@ class MainActivity : ComponentActivity() {
                             "Answer in the user's language. Never claim to use tools or data you do not have."
                     ChatMode.CODING ->
                         "You are Nexora Code, a senior software engineer. " +
-                            "Produce correct, maintainable, modern code. Explain assumptions and never fabricate test results."
+                            "Produce complete, correct, maintainable, modern code. Preserve all required imports and supporting functions. " +
+                            "Do not stop mid-file; if the model context prevents completion, state exactly what remains. " +
+                            "Explain assumptions and never fabricate test results."
                 }
 
                 val startedAt = SystemClock.elapsedRealtime()
                 val promptTask = async(Dispatchers.IO) {
-                    NativeLlama.startPrompt(systemPrompt, trimmed, 512)
+                    NativeLlama.startPrompt(systemPrompt, trimmed, maxOutputTokens)
                 }
                 while (!promptTask.isCompleted) {
                     updateInferenceProgress(NativeLlama.inferenceStats(), startedAt, "Memproses prompt")
@@ -685,36 +709,35 @@ class MainActivity : ComponentActivity() {
                 while (true) {
                     val token = withContext(Dispatchers.IO) { NativeLlama.nextToken() } ?: break
                     output.append(token)
-                    val index = messages.lastIndex
-                    if (index >= 0) messages[index] = ChatMessage("assistant", output.toString())
+                    generationPreview = output.toString()
                     updateInferenceProgress(NativeLlama.inferenceStats(), startedAt, "Menghasilkan jawaban")
                 }
 
                 val generationError = withContext(Dispatchers.IO) { NativeLlama.lastError() }
-                if (output.isEmpty()) {
-                    val index = messages.lastIndex
-                    if (index >= 0) {
-                        messages[index] = ChatMessage(
-                            "assistant",
-                            if (generationError.isNotBlank()) {
-                                "Generasi berhenti: $generationError"
-                            } else {
-                                "Model tidak menghasilkan teks untuk prompt ini."
-                            }
-                        )
-                    }
+                val finalStats = NativeLlama.inferenceStats()
+                val producedTokens = finalStats.getOrNull(3) ?: 0
+                val effectiveLimit = finalStats.getOrNull(4) ?: maxOutputTokens
+                val finalContent = when {
+                    output.isNotEmpty() -> output.toString()
+                    generationError.isNotBlank() -> "Generasi berhenti: $generationError"
+                    else -> "Model tidak menghasilkan teks untuk prompt ini."
                 }
+                messages.add(ChatMessage("assistant", finalContent))
+                generationPreview = ""
                 if (generationError.isNotBlank()) errorText = generationError
                 busyProgress = 1f
                 busyLabel = "Inference selesai"
-                val finalStats = NativeLlama.inferenceStats()
-                progressDetail = "Token output aktual: ${finalStats.getOrNull(3) ?: output.length}"
-                statusText = "Inference selesai secara lokal."
-            } catch (error: Throwable) {
-                val index = messages.lastIndex
-                if (index >= 0 && messages[index].role == "assistant" && messages[index].content.isBlank()) {
-                    messages[index] = ChatMessage("assistant", "Generasi gagal. Periksa pesan kesalahan.")
+                progressDetail = "Token output aktual: $producedTokens"
+                statusText = if (effectiveLimit < maxOutputTokens) {
+                    "Inference selesai secara lokal. Output dibatasi oleh sisa context: $effectiveLimit dari $maxOutputTokens token yang diminta."
+                } else {
+                    "Inference selesai secara lokal."
                 }
+            } catch (error: Throwable) {
+                if (messages.lastOrNull()?.role == "user") {
+                    messages.add(ChatMessage("assistant", "Generasi gagal. Periksa pesan kesalahan."))
+                }
+                generationPreview = ""
                 errorText = error.message ?: "Inference gagal."
             } finally {
                 isBusy = false
