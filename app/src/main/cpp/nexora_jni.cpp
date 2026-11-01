@@ -501,13 +501,13 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_nexora_ai_NativeLlama_isModelLoaded(JNIEnv *, jobject) {
     std::lock_guard<std::mutex> guard(g_mutex);
-    return g_model != nullptr && g_context != nullptr ? JNI_TRUE : JNI_FALSE;
+    return (g_model != nullptr && g_context != nullptr && g_sampler != nullptr && g_batch_initialized) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_nexora_ai_NativeLlama_activePath(JNIEnv *env, jobject) {
     std::lock_guard<std::mutex> guard(g_mutex);
-    return to_java_string(env, g_model_path);
+    return to_java_string(env, g_model != nullptr ? g_model_path : "");
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -519,9 +519,13 @@ Java_com_nexora_ai_NativeLlama_restoreHistory(JNIEnv *env, jobject, jstring syst
         set_error("Muat model GGUF sebelum memulihkan riwayat.");
         return -1;
     }
-    if (g_generation_active) {
-        set_error("Tidak dapat memulihkan riwayat ketika generasi masih aktif.");
+    if (g_generation_active || g_inference_phase.load(std::memory_order_relaxed) != 0) {
+        set_error("Tidak dapat memulihkan riwayat ketika inference masih aktif.");
         return -2;
+    }
+    if (!g_batch_initialized) {
+        set_error("Batch native belum siap untuk memulihkan riwayat.");
+        return -8;
     }
     if (system_prompt == nullptr || roles == nullptr || contents == nullptr) {
         set_error("Data riwayat tidak valid.");
@@ -540,16 +544,22 @@ Java_com_nexora_ai_NativeLlama_restoreHistory(JNIEnv *env, jobject, jstring syst
     for (jsize index = 0; index < role_count; ++index) {
         auto role_value = static_cast<jstring>(env->GetObjectArrayElement(roles, index));
         auto content_value = static_cast<jstring>(env->GetObjectArrayElement(contents, index));
-        if (role_value == nullptr || content_value == nullptr) {
+        if (env->ExceptionCheck() || role_value == nullptr || content_value == nullptr) {
             if (role_value != nullptr) env->DeleteLocalRef(role_value);
             if (content_value != nullptr) env->DeleteLocalRef(content_value);
-            set_error("Pesan riwayat mengandung nilai kosong.");
+            env->ExceptionClear();
+            set_error("Pesan riwayat tidak dapat dibaca dari Android.");
             return -5;
         }
         const std::string role = from_java_string(env, role_value);
         const std::string content = from_java_string(env, content_value);
         env->DeleteLocalRef(role_value);
         env->DeleteLocalRef(content_value);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            set_error("String pesan riwayat tidak dapat dikonversi.");
+            return -9;
+        }
         if (role != "user" && role != "assistant") {
             set_error("Peran pesan riwayat tidak dikenal.");
             return -6;

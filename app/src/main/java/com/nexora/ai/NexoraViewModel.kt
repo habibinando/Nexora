@@ -1,7 +1,7 @@
 package com.nexora.ai
 
 import android.app.Application
-import androidx.compose.runtime.mutableStateListOf
+import android.util.AtomicFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -16,11 +16,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
+import java.util.concurrent.atomic.AtomicLong
 
 internal data class NexoraUiState(
+    val models: List<LocalModel> = emptyList(),
+    val messages: List<ChatMessage> = emptyList(),
     val activeModelId: String? = null,
     val page: AppPage = AppPage.CHAT,
     val chatMode: ChatMode = ChatMode.CHAT,
@@ -46,11 +46,13 @@ internal data class NexoraUiState(
 internal class NexoraViewModel(application: Application) : AndroidViewModel(application) {
     private val _uiState = MutableStateFlow(NexoraUiState())
     val uiState: StateFlow<NexoraUiState> = _uiState.asStateFlow()
-    val models = mutableStateListOf<LocalModel>()
-    val messages = mutableStateListOf<ChatMessage>()
+    val models: List<LocalModel> get() = _uiState.value.models
+    val messages: List<ChatMessage> get() = _uiState.value.messages
 
-    private val conversationFile = File(application.filesDir, "conversation.json")
+    private val conversationFile = AtomicFile(File(application.filesDir, "conversation.json"))
     private val persistenceMutex = Mutex()
+    private val persistenceRevision = AtomicLong(0L)
+    private var modelIndexLoaded = false
 
     @Volatile
     private var conversationModelId: String? = null
@@ -63,40 +65,47 @@ internal class NexoraViewModel(application: Application) : AndroidViewModel(appl
         _uiState.update(reducer)
     }
 
-    fun hasConversationForModel(modelId: String): Boolean =
-        conversationModelId == modelId
-
+    fun hasConversationForModel(modelId: String): Boolean = conversationModelId == modelId
+    fun hasLoadedModelIndex(): Boolean = modelIndexLoaded
+    fun replaceModels(models: List<LocalModel>) {
+        modelIndexLoaded = true
+        updateState { copy(models = models.toList()) }
+    }
+    fun addModel(model: LocalModel) = updateState { copy(models = models + model) }
+    fun updateModel(model: LocalModel) = updateState {
+        copy(models = models.map { current -> if (current.id == model.id) model else current })
+    }
+    fun removeModel(modelId: String) = updateState { copy(models = models.filterNot { it.id == modelId }) }
     fun appendMessage(modelId: String?, mode: ChatMode, message: ChatMessage) {
-        messages.add(message)
+        updateState { copy(messages = messages + message) }
         persistConversation(modelId, mode)
     }
-
     fun clearConversation(modelId: String?, mode: ChatMode) {
-        messages.clear()
         conversationModelId = modelId
+        updateState { copy(messages = emptyList(), generationPreview = "") }
         persistConversation(modelId, mode)
     }
-
     fun persistConversation(modelId: String?, mode: ChatMode) {
         conversationModelId = modelId
-        val snapshot = messages.toList()
+        val revision = persistenceRevision.incrementAndGet()
+        val snapshot = uiState.value.messages.toList()
         viewModelScope.launch(Dispatchers.IO) {
             persistenceMutex.withLock {
-                runCatching {
-                    writeConversationAtomically(modelId, mode, snapshot)
-                }.onFailure { failure ->
-                    updateState {
-                        copy(errorText = "Gagal menyimpan riwayat lokal: ${failure.message ?: failure.javaClass.simpleName}")
+                if (revision != persistenceRevision.get()) return@withLock
+                runCatching { writeConversationAtomically(modelId, mode, snapshot) }
+                    .onFailure { failure ->
+                        updateState {
+                            copy(errorText = "Gagal menyimpan riwayat lokal: ${failure.message ?: failure.javaClass.simpleName}")
+                        }
                     }
-                }
             }
         }
     }
 
     private fun restoreConversationFromDisk() {
-        if (!conversationFile.isFile) return
+        val input = runCatching { conversationFile.openRead() }.getOrNull() ?: return
         runCatching {
-            val root = JSONObject(conversationFile.readText(Charsets.UTF_8))
+            val root = input.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
             conversationModelId = if (root.isNull("modelId")) null else root.optString("modelId")
             val savedMode = ChatMode.entries.firstOrNull { it.name == root.optString("chatMode") }
                 ?: ChatMode.CHAT
@@ -109,8 +118,12 @@ internal class NexoraViewModel(application: Application) : AndroidViewModel(appl
                     restored += ChatMessage(role, row.optString("content"))
                 }
             }
-            messages.addAll(restored)
-            _uiState.update { it.copy(chatMode = savedMode) }
+            val interrupted = restored.lastOrNull()?.role == "user"
+            if (interrupted) {
+                restored += ChatMessage("assistant", getApplication<Application>().getString(R.string.generation_interrupted))
+            }
+            _uiState.update { it.copy(messages = restored, chatMode = savedMode) }
+            if (interrupted) persistConversation(conversationModelId, savedMode)
         }.onFailure { failure ->
             _uiState.update {
                 it.copy(errorText = "Riwayat lokal tidak dapat dibaca: ${failure.message ?: failure.javaClass.simpleName}")
@@ -133,40 +146,36 @@ internal class NexoraViewModel(application: Application) : AndroidViewModel(appl
         }
         root.put("messages", rows)
 
-        val parent = conversationFile.parentFile ?: error("Direktori riwayat lokal tidak tersedia.")
-        check(parent.exists() || parent.mkdirs()) { "Direktori riwayat lokal tidak dapat dibuat." }
-        val temporary = File(parent, "${conversationFile.name}.partial")
+        val stream = conversationFile.startWrite()
         try {
-            FileOutputStream(temporary).use { output ->
-                output.write(root.toString().toByteArray(Charsets.UTF_8))
-                output.flush()
-                output.fd.sync()
-            }
-            try {
-                Files.move(
-                    temporary.toPath(),
-                    conversationFile.toPath(),
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING
-                )
-            } catch (_: AtomicMoveNotSupportedException) {
-                Files.move(temporary.toPath(), conversationFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            }
-        } finally {
-            if (temporary.exists()) temporary.delete()
+            stream.write(root.toString().toByteArray(Charsets.UTF_8))
+            stream.flush()
+            stream.fd.sync()
+            conversationFile.finishWrite(stream)
+        } catch (error: Throwable) {
+            conversationFile.failWrite(stream)
+            throw error
         }
     }
 
     override fun onCleared() {
-        super.onCleared()
+        val snapshot = uiState.value.messages.toList()
+        val modelId = conversationModelId
+        val mode = uiState.value.chatMode
         Thread({
+            runCatching {
+                kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                    persistenceMutex.withLock { writeConversationAtomically(modelId, mode, snapshot) }
+                }
+            }
             runCatching { NativeLlama.cancelGeneration() }
             runCatching { NativeLlama.nextToken() }
-            runCatching { NativeLlama.unload() }
+            if (runCatching { NativeLlama.isModelLoaded() }.getOrDefault(false)) runCatching { NativeLlama.unload() }
             runCatching { NativeLlama.shutdown() }
         }, "NexoraNativeCleanup").apply {
             isDaemon = true
             start()
         }
+        super.onCleared()
     }
 }

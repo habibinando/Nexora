@@ -49,8 +49,8 @@ class MainActivity : ComponentActivity() {
     private val viewModel: NexoraViewModel by lazy(LazyThreadSafetyMode.NONE) {
         ViewModelProvider(this)[NexoraViewModel::class.java]
     }
-    private val models get() = viewModel.models
-    private val messages get() = viewModel.messages
+    private val models get() = viewModel.uiState.value.models
+    private val messages get() = viewModel.uiState.value.messages
 
     private var activeModelId: String?
         get() = viewModel.uiState.value.activeModelId
@@ -141,11 +141,11 @@ class MainActivity : ComponentActivity() {
             val uiState by viewModel.uiState.collectAsState()
             NexoraTheme {
                 NexoraScreen(
-                    models = models,
+                    models = uiState.models,
                     activeModelId = uiState.activeModelId,
                     currentPage = uiState.page,
                     chatMode = uiState.chatMode,
-                    messages = messages,
+                    messages = uiState.messages,
                     engineReady = uiState.engineReady,
                     isBusy = uiState.isBusy,
                     canStopGeneration = uiState.canStopGeneration,
@@ -198,7 +198,7 @@ class MainActivity : ComponentActivity() {
                     if (restoredModel != null) {
                         activeModelId = restoredModel.id
                         visionSupported = withContext(Dispatchers.IO) { NativeLlama.hasVision() }
-                        synchronizeNativeConversation(restoredModel.id)
+                        if (!viewModel.uiState.value.isBusy) synchronizeNativeConversation(restoredModel.id)
                         val contextSize = withContext(Dispatchers.IO) { NativeLlama.contextSize() }
                         statusText = "Model aktif: ${restoredModel.name} · Context ${contextSize} token"
                     } else {
@@ -240,7 +240,7 @@ class MainActivity : ComponentActivity() {
                 val name = displayName(uri)
                 val file = copyGgufAssetWithProgress(uri, name, "model")
                 val model = LocalModel(UUID.randomUUID().toString(), name, file.absolutePath, file.length())
-                models.add(model)
+                viewModel.addModel(model)
                 saveModelIndex()
                 page = AppPage.MODELS
                 statusText = "Model ${model.name} berhasil diimpor. Model belum dimuat."
@@ -485,13 +485,15 @@ class MainActivity : ComponentActivity() {
                     withContext(Dispatchers.IO) { NativeLlama.unload() }
                     activeModelId = null
                     visionSupported = false
+                }
+                if (viewModel.hasConversationForModel(model.id)) {
                     viewModel.clearConversation(null, chatMode)
                 }
                 withContext(Dispatchers.IO) {
                     File(model.path).delete()
                     model.projectorPath?.let { File(it).delete() }
                 }
-                models.removeAll { it.id == model.id }
+                viewModel.removeModel(model.id)
                 saveModelIndex()
                 statusText = "Model dihapus dari penyimpanan aplikasi."
             } catch (error: Throwable) {
@@ -526,7 +528,7 @@ class MainActivity : ComponentActivity() {
                 val projector = copyGgufAssetWithProgress(uri, name, "mmproj")
                 val previous = models[targetIndex]
                 val updated = previous.copy(projectorPath = projector.absolutePath, projectorName = name)
-                models[targetIndex] = updated
+                viewModel.updateModel(updated)
                 saveModelIndex()
                 if (activeModelId == targetId) {
                     withContext(Dispatchers.IO) { NativeLlama.unload() }
@@ -1102,6 +1104,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadModelIndex() {
+        if (viewModel.hasLoadedModelIndex()) return
+        val loadedModels = mutableListOf<LocalModel>()
         val stored = getSharedPreferences("nexora_models", MODE_PRIVATE)
             .getString("items", "[]") ?: "[]"
         runCatching {
@@ -1110,25 +1114,18 @@ class MainActivity : ComponentActivity() {
                 val item = array.getJSONObject(index)
                 val projectorPath = item.optString("projectorPath").takeIf { it.isNotBlank() }
                 val model = LocalModel(
-                    item.getString("id"),
-                    item.getString("name"),
-                    item.getString("path"),
-                    item.getLong("sizeBytes"),
-                    projectorPath,
+                    item.getString("id"), item.getString("name"), item.getString("path"),
+                    item.getLong("sizeBytes"), projectorPath,
                     item.optString("projectorName").takeIf { it.isNotBlank() }
                 )
                 if (File(model.path).isFile) {
-                    if (model.projectorPath != null && !File(model.projectorPath).isFile) {
-                        models.add(model.copy(projectorPath = null, projectorName = null))
-                    } else {
-                        models.add(model)
-                    }
+                    loadedModels += if (model.projectorPath != null && !File(model.projectorPath).isFile) {
+                        model.copy(projectorPath = null, projectorName = null)
+                    } else model
                 }
             }
-        }.onFailure {
-            models.clear()
-            errorText = "Daftar model lokal rusak dan perlu diimpor ulang."
-        }
+        }.onFailure { errorText = "Daftar model lokal rusak dan perlu diimpor ulang." }
+        viewModel.replaceModels(loadedModels)
     }
 
     private fun saveModelIndex() {

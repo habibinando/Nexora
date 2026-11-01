@@ -223,18 +223,22 @@ Riwayat scope awal dipertahankan sebagai catatan historis; pekerjaan selanjutnya
 
 ## Fase 1 — K4: StateFlow ViewModel dan lifecycle
 
-### Implementasi
-- Kepemilikan state UI dipindah ke `NexoraViewModel`; `MainActivity` menjadi host Activity Result dan penghubung operasi Android.
-- Scalar state dipancarkan lewat `StateFlow<NexoraUiState>`; daftar model/pesan dimiliki ViewModel sebagai snapshot state list yang reaktif untuk Compose.
-- `rememberSaveable` digunakan untuk input chat, input batas output, dan pertanyaan vision.
-- Atribut `configChanges` yang menghambat Activity recreation otomatis dihapus.
-- JNI menyediakan `isModelLoaded()`, `activePath()`, dan `restoreHistory()`; Activity mencocokkan path model native dengan indeks model setelah dibuat ulang.
-- Riwayat chat disimpan ke JSON app-private melalui file sementara, `fsync`, dan atomic replace. Riwayat diikat ke ID model dan mode chat.
-- Ketika model yang sama dimuat kembali, role/content dipulihkan ke native history. KV cache dibangun ulang secara lazy pada giliran berikutnya; riwayat model berbeda tidak dicampur.
-- Unload biasa mempertahankan riwayat lokal; penghapusan model aktif menghapus riwayat yang terikat padanya.
-- `onCleared()` meminta Stop, menyelesaikan panggilan native, lalu unload/shutdown llama.cpp pada thread cleanup terpisah.
+### Implementasi dan koreksi
+- Seluruh state UI, termasuk daftar model dan pesan, berada sebagai immutable list/scalar dalam satu `StateFlow<NexoraUiState>` di `NexoraViewModel`.
+- `MainActivity` hanya membaca snapshot Flow dan memanggil metode ViewModel untuk perubahan model/transcript; Activity tidak memutasi daftar secara langsung.
+- Input chat, batas output, dan pertanyaan vision memakai `rememberSaveable`.
+- Atribut `configChanges` manual dihapus sehingga Activity recreation ditangani Android.
+- JNI `isModelLoaded()`, `activePath()`, dan `restoreHistory()` menyinkronkan model/transcript native. Restore menolak bila phase inference masih aktif atau batch belum siap.
+- Riwayat JSON disimpan dalam direktori privat dengan `android.util.AtomicFile`, `fd.sync()`, dan transaksi `finishWrite()`/`failWrite()`.
+- Revision counter mencegah snapshot penyimpanan lama menimpa transcript terbaru.
+- Jika proses mati setelah pesan user tersimpan tetapi sebelum jawaban selesai, restore menambahkan marker lokal `generation_interrupted`; native transcript tidak berakhir dengan user turn tanpa assistant.
+- Saat model sama dimuat kembali, history role/content dipulihkan ke native; KV dibangun ulang lazy pada giliran berikutnya dan tidak diklaim bertahan setelah process death.
+- Unload mempertahankan riwayat; penghapusan model menghapus riwayat yang terkait dengan model tersebut.
+- `onCleared()` menulis snapshot final lalu menjalankan cancellation/unload/shutdown native pada thread IO.
 
-### Batas verifikasi
-- CI K4 dan pemulihan proses perlu diverifikasi sebelum fase dinyatakan selesai.
-- Process death tetap menghilangkan bobot model dari RAM; GGUF perlu dimuat ulang. JSON memulihkan transcript dan system prompt, bukan KV cache.
-- Smoke test recovery pada perangkat belum dilakukan untuk perubahan ini.
+### Verifikasi / batas
+- Pemeriksaan statis JNI dan referensi resource dilakukan sebelum commit koreksi.
+- CI koreksi K4 menjalankan unit test serta build debug/release; hasil terbaru wajib ditinjau dari workflow.
+- Process death menghapus model dari RAM; GGUF harus dimuat ulang saat aplikasi berjalan kembali.
+- CI compile bukan bukti runtime recovery transcript setelah process death atau seluruh siklus Activity recreation.
+
