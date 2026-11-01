@@ -252,3 +252,16 @@ Riwayat scope awal dipertahankan sebagai catatan historis; pekerjaan selanjutnya
 - System prompt chat/coding pada jalur Activity tetap menggunakan helper `systemPromptForMode()` untuk penyelarasan antara restore dan inference pada refactor yang ada.
 - Llama 3, Gemma, Qwen, dan Mistral sudah dinilai dari jalur API/template; test runtime per model masih memerlukan GGUF dari keluarga tersebut. Tidak mengklaim semua varian tervalidasi empiris.
 
+
+
+## K6 — Context/KV safety audit: IMPLEMENTED (source-level)
+
+Commit: `41a57b08d74f5bc072cb4fb83dc8ab70c673dd4c`.
+
+- Native context selection now reads GGUF architecture metadata through the pinned llama.cpp public API: block count, KV head count, key/value dimensions, with embedding-length fallback where the model metadata does not expose explicit key/value lengths.
+- KV-cache estimates are calculated separately for F16 and a conservative Q8-equivalent estimate; context selection uses available system RAM, a fixed 512 MiB reserve, and a 60% allocation ceiling.
+- Requested context remains bounded by model-trained context and a minimum of 512 tokens.
+- Flash Attention and experimental KV quantization are not enabled implicitly; this change only selects a safer context before `llama_init_from_model`.
+- Runtime validation on physical GGUF models remains required. The current CI gate must confirm the exact pinned llama.cpp header signature and Android build.
+
+K7/R1–R7/U1–U4/G1–G3 remain pending until their definitions are present in repository documentation or PR history; no undocumented scope is being invented.
