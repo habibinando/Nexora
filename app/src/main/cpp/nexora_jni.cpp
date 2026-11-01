@@ -4,6 +4,7 @@
 #include <mtmd.h>
 #include <mtmd-helper.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -26,6 +27,18 @@ bool g_generation_active = false;
 std::string g_system_prompt;
 std::vector<std::pair<std::string, std::string>> g_history;
 std::string g_pending_user, g_pending_response, g_utf8_pending, g_last_error;
+std::atomic<float> g_load_progress{-1.0f};
+std::atomic<int32_t> g_inference_phase{0}; // 0 idle, 1 input/prefill, 2 token generation
+std::atomic<int32_t> g_prompt_processed{0};
+std::atomic<int32_t> g_prompt_total{0};
+std::atomic<int32_t> g_generated_tokens{0};
+std::atomic<int32_t> g_generation_limit{0};
+
+bool model_load_progress_callback(float progress, void *) {
+    const float safe_progress = std::clamp(progress, 0.0f, 1.0f);
+    g_load_progress.store(0.05f + safe_progress * 0.85f, std::memory_order_relaxed);
+    return true;
+}
 
 void set_error(const std::string &message) { g_last_error = message; }
 void clear_error() { g_last_error.clear(); }
@@ -38,6 +51,11 @@ void free_model_locked() {
     g_pending_user.clear();
     g_pending_response.clear();
     g_utf8_pending.clear();
+    g_inference_phase.store(0, std::memory_order_relaxed);
+    g_prompt_processed.store(0, std::memory_order_relaxed);
+    g_prompt_total.store(0, std::memory_order_relaxed);
+    g_generated_tokens.store(0, std::memory_order_relaxed);
+    g_generation_limit.store(0, std::memory_order_relaxed);
     if (g_sampler) { llama_sampler_free(g_sampler); g_sampler = nullptr; }
     if (g_batch_initialized) { llama_batch_free(g_batch); g_batch_initialized = false; }
     if (g_mtmd) { mtmd_free(g_mtmd); g_mtmd = nullptr; }
@@ -82,7 +100,10 @@ std::vector<llama_token> tokenize_locked(const std::string &text) {
 
 bool decode_tokens_locked(const std::vector<llama_token> &tokens) {
     if (!g_context || !g_batch_initialized) { set_error("Model belum dimuat."); return false; }
-    constexpr int32_t capacity = 256;
+    constexpr int32_t capacity = 32;
+    g_prompt_processed.store(0, std::memory_order_relaxed);
+    g_prompt_total.store(static_cast<int32_t>(tokens.size()), std::memory_order_relaxed);
+    g_inference_phase.store(1, std::memory_order_relaxed);
     size_t offset = 0;
     while (offset < tokens.size()) {
         const int32_t count = static_cast<int32_t>(
@@ -102,6 +123,7 @@ bool decode_tokens_locked(const std::vector<llama_token> &tokens) {
         }
         g_position += count;
         offset += static_cast<size_t>(count);
+        g_prompt_processed.store(static_cast<int32_t>(offset), std::memory_order_relaxed);
     }
     return true;
 }
@@ -151,6 +173,7 @@ void finish_generation_locked() {
     g_utf8_pending.clear();
     g_remaining_tokens = 0;
     g_generation_active = false;
+    g_inference_phase.store(0, std::memory_order_relaxed);
 }
 
 std::string from_java_string(JNIEnv *env, jstring value) {
@@ -246,7 +269,10 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     const std::string projector = from_java_string(env, projector_path);
     if (path.empty()) { set_error("Path model tidak valid."); return -1; }
     free_model_locked();
+    g_load_progress.store(0.0f, std::memory_order_relaxed);
     llama_model_params model_params = llama_model_default_params();
+    model_params.progress_callback = model_load_progress_callback;
+    model_params.progress_callback_user_data = nullptr;
 #if defined(NEXORA_HAS_VULKAN)
     model_params.n_gpu_layers = -1; // Offload all supported layers when built with Vulkan.
 #else
@@ -254,9 +280,11 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
 #endif
     g_model = llama_model_load_from_file(path.c_str(), model_params);
     if (!g_model) {
+        g_load_progress.store(-1.0f, std::memory_order_relaxed);
         set_error("llama.cpp gagal memuat GGUF. Periksa file, arsitektur, dan kapasitas RAM.");
         return -2;
     }
+    g_load_progress.store(0.90f, std::memory_order_relaxed);
 
     const int32_t requested = std::max(512, std::min(8192, static_cast<int32_t>(context_size)));
     const int32_t trained = llama_model_n_ctx_train(g_model);
@@ -273,9 +301,11 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     g_context = llama_init_from_model(g_model, params);
     if (!g_context) {
         free_model_locked();
+        g_load_progress.store(-1.0f, std::memory_order_relaxed);
         set_error("Gagal mengalokasikan context. Coba model lebih kecil atau context 1024.");
         return -3;
     }
+    g_load_progress.store(0.93f, std::memory_order_relaxed);
 
     if (!projector.empty()) {
         mtmd_context_params mtmd_params = mtmd_context_params_default();
@@ -286,16 +316,19 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
         g_mtmd = mtmd_init_from_file(projector.c_str(), g_model, mtmd_params);
         if (g_mtmd == nullptr || !mtmd_support_vision(g_mtmd)) {
             free_model_locked();
+            g_load_progress.store(-1.0f, std::memory_order_relaxed);
             set_error("mmproj tidak cocok dengan model ini atau tidak menyediakan encoder vision yang didukung llama.cpp.");
             return -4;
         }
     }
+    g_load_progress.store(0.96f, std::memory_order_relaxed);
 
     g_batch = llama_batch_init(256, 0, 1);
     g_batch_initialized = true;
     g_sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
     if (!g_sampler) {
         free_model_locked();
+        g_load_progress.store(-1.0f, std::memory_order_relaxed);
         set_error("Gagal menginisialisasi sampler.");
         return -5;
     }
@@ -305,7 +338,27 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     llama_sampler_chain_add(g_sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
     g_position = 0;
     g_history.clear();
+    g_load_progress.store(1.0f, std::memory_order_relaxed);
     return 0;
+}
+
+extern "C" JNIEXPORT jfloat JNICALL
+Java_com_nexora_ai_NativeLlama_loadProgress(JNIEnv *, jobject) {
+    return g_load_progress.load(std::memory_order_relaxed);
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_nexora_ai_NativeLlama_inferenceStats(JNIEnv *env, jobject) {
+    const jint values[5] = {
+        g_inference_phase.load(std::memory_order_relaxed),
+        g_prompt_processed.load(std::memory_order_relaxed),
+        g_prompt_total.load(std::memory_order_relaxed),
+        g_generated_tokens.load(std::memory_order_relaxed),
+        g_generation_limit.load(std::memory_order_relaxed)
+    };
+    jintArray result = env->NewIntArray(5);
+    if (result != nullptr) env->SetIntArrayRegion(result, 0, 5, values);
+    return result;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -320,6 +373,7 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
                                                  jint max_tokens) {
     std::lock_guard<std::mutex> guard(g_mutex);
     clear_error();
+    g_inference_phase.store(0, std::memory_order_relaxed);
     if (!g_model || !g_context || !g_sampler) {
         set_error("Muat model GGUF terlebih dahulu.");
         return -1;
@@ -418,6 +472,9 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
     }
 
     const size_t chunk_count = mtmd_input_chunks_size(chunks);
+    g_prompt_total.store(static_cast<int32_t>(chunk_count), std::memory_order_relaxed);
+    g_prompt_processed.store(0, std::memory_order_relaxed);
+    g_inference_phase.store(1, std::memory_order_relaxed);
     bool evaluated = chunk_count > 0;
     for (size_t index = 0; evaluated && index < chunk_count; ++index) {
         const mtmd_input_chunk *chunk = mtmd_input_chunks_get(chunks, index);
@@ -433,6 +490,7 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
             break;
         }
         g_position = static_cast<int32_t>(next_position);
+        g_prompt_processed.store(static_cast<int32_t>(index + 1), std::memory_order_relaxed);
     }
 
     mtmd_input_chunks_free(chunks);
@@ -459,6 +517,9 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
     g_pending_response.clear();
     g_utf8_pending.clear();
     g_remaining_tokens = requested_tokens;
+    g_generated_tokens.store(0, std::memory_order_relaxed);
+    g_generation_limit.store(requested_tokens, std::memory_order_relaxed);
+    g_inference_phase.store(2, std::memory_order_relaxed);
     g_generation_active = true;
     return 0;
 }
@@ -468,6 +529,7 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
                                             jstring user_message, jint max_tokens) {
     std::lock_guard<std::mutex> guard(g_mutex);
     clear_error();
+    g_inference_phase.store(0, std::memory_order_relaxed);
     if (!g_model || !g_context || !g_sampler) {
         set_error("Impor dan muat model GGUF terlebih dahulu."); return -1;
     }
@@ -514,6 +576,9 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
     g_pending_response.clear();
     g_utf8_pending.clear();
     g_remaining_tokens = requested_tokens;
+    g_generated_tokens.store(0, std::memory_order_relaxed);
+    g_generation_limit.store(requested_tokens, std::memory_order_relaxed);
+    g_inference_phase.store(2, std::memory_order_relaxed);
     g_generation_active = true;
     return 0;
 }
@@ -543,6 +608,7 @@ Java_com_nexora_ai_NativeLlama_nextToken(JNIEnv *env, jobject) {
     }
     ++g_position;
     --g_remaining_tokens;
+    g_generated_tokens.fetch_add(1, std::memory_order_relaxed);
 
     char piece[256];
     int32_t size = llama_token_to_piece(vocab, token, piece, sizeof(piece), 0, false);
@@ -582,12 +648,18 @@ Java_com_nexora_ai_NativeLlama_resetChat(JNIEnv *, jobject) {
     g_pending_response.clear();
     g_utf8_pending.clear();
     g_remaining_tokens = 0;
+    g_inference_phase.store(0, std::memory_order_relaxed);
+    g_prompt_processed.store(0, std::memory_order_relaxed);
+    g_prompt_total.store(0, std::memory_order_relaxed);
+    g_generated_tokens.store(0, std::memory_order_relaxed);
+    g_generation_limit.store(0, std::memory_order_relaxed);
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_nexora_ai_NativeLlama_unload(JNIEnv *, jobject) {
     std::lock_guard<std::mutex> guard(g_mutex);
     free_model_locked();
+    g_load_progress.store(-1.0f, std::memory_order_relaxed);
     g_system_prompt.clear();
 }
 

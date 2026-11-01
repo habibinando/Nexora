@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -14,7 +15,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -24,6 +28,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 private const val MAX_VISION_IMAGE_BYTES = 20 * 1024 * 1024
 
@@ -49,6 +54,8 @@ class MainActivity : ComponentActivity() {
     private var engineReady by mutableStateOf(false)
     private var isBusy by mutableStateOf(false)
     private var busyLabel by mutableStateOf("")
+    private var busyProgress by mutableStateOf(-1f)
+    private var progressDetail by mutableStateOf("")
     private var statusText by mutableStateOf("Menyiapkan runtime lokal…")
     private var systemInfo by mutableStateOf("Backend belum diinisialisasi.")
     private var hardwareInfo by mutableStateOf("Memeriksa perangkat…")
@@ -90,6 +97,8 @@ class MainActivity : ComponentActivity() {
                     engineReady = engineReady,
                     isBusy = isBusy,
                     busyLabel = busyLabel,
+                    busyProgress = busyProgress,
+                    progressDetail = progressDetail,
                     statusText = statusText,
                     errorText = errorText,
                     systemInfo = systemInfo,
@@ -144,9 +153,13 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             isBusy = true
             busyLabel = "Mengimpor model…"
+            busyProgress = 0f
+            progressDetail = "Mempersiapkan penyalinan file GGUF"
             errorText = null
             try {
-                val model = withContext(Dispatchers.IO) { copyAndValidateModel(uri) }
+                val name = displayName(uri)
+                val file = copyGgufAssetWithProgress(uri, name, "model")
+                val model = LocalModel(UUID.randomUUID().toString(), name, file.absolutePath, file.length())
                 models.add(model)
                 saveModelIndex()
                 page = AppPage.MODELS
@@ -156,6 +169,8 @@ class MainActivity : ComponentActivity() {
             } finally {
                 isBusy = false
                 busyLabel = ""
+                busyProgress = -1f
+                progressDetail = ""
             }
         }
     }
@@ -166,23 +181,54 @@ class MainActivity : ComponentActivity() {
             else null
         } ?: "model.gguf"
 
-    private fun copyGgufAsset(uri: Uri, requestedName: String, prefix: String): File {
+    private fun queryDocumentSize(uri: Uri): Long? =
+        runCatching {
+            contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                if (!cursor.moveToFirst()) null
+                else {
+                    val column = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (column >= 0 && !cursor.isNull(column)) cursor.getLong(column).takeIf { it > 0L }
+                    else null
+                }
+            }
+        }.getOrNull()
+
+    private fun copyGgufAsset(
+        uri: Uri,
+        requestedName: String,
+        prefix: String,
+        onProgress: (copiedBytes: Long, totalBytes: Long?) -> Unit
+    ): File {
         require(ModelFileValidator.isSupportedSingleFile(requestedName)) {
             "Pilih satu file GGUF. File GGUF shard/terpisah belum didukung."
         }
+
+        val totalBytes = queryDocumentSize(uri)
         val directory = File(filesDir, "models").apply { mkdirs() }
         val safeName = requestedName.replace(Regex("[^A-Za-z0-9._-]"), "_")
-        val uniqueName = "${prefix}-${System.currentTimeMillis()}-$safeName"
-        val temporary = File(directory, "$uniqueName.partial")
+        val uniqueName = "${prefix}-${System.currentTimeMillis()}-${safeName}"
+        val temporary = File(directory, "$${uniqueName}.partial")
         val destination = File(directory, uniqueName)
+
         try {
             val source = contentResolver.openInputStream(uri) ?: error("File sumber tidak dapat dibaca.")
+            var copiedBytes = 0L
             source.use { input ->
                 FileOutputStream(temporary).use { output ->
-                    input.copyTo(output, bufferSize = 1024 * 1024)
+                    val buffer = ByteArray(1024 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        if (count == 0) continue
+                        output.write(buffer, 0, count)
+                        copiedBytes += count
+                        onProgress(copiedBytes, totalBytes)
+                    }
+                    output.flush()
                     output.fd.sync()
                 }
             }
+
             val header = ByteArray(4)
             FileInputStream(temporary).use { input ->
                 require(input.read(header) == 4) { "File terlalu kecil untuk menjadi GGUF." }
@@ -192,6 +238,7 @@ class MainActivity : ComponentActivity() {
             }
             require(temporary.length() > 4L) { "File GGUF kosong atau rusak." }
             check(temporary.renameTo(destination)) { "Tidak dapat menyimpan file ke penyimpanan aplikasi." }
+            onProgress(copiedBytes, totalBytes)
             return destination
         } catch (error: Throwable) {
             temporary.delete()
@@ -200,10 +247,40 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun copyAndValidateModel(uri: Uri): LocalModel {
-        val name = displayName(uri)
-        val file = copyGgufAsset(uri, name, "model")
-        return LocalModel(UUID.randomUUID().toString(), name, file.absolutePath, file.length())
+    private suspend fun CoroutineScope.copyGgufAssetWithProgress(
+        uri: Uri,
+        requestedName: String,
+        prefix: String
+    ): File {
+        val copiedBytes = AtomicLong(0L)
+        val totalBytes = AtomicLong(queryDocumentSize(uri) ?: -1L)
+        val copyTask = async(Dispatchers.IO) {
+            copyGgufAsset(uri, requestedName, prefix) { copied, total ->
+                copiedBytes.set(copied)
+                if (total != null && total > 0L) totalBytes.set(total)
+            }
+        }
+
+        while (!copyTask.isCompleted) {
+            val copied = copiedBytes.get()
+            val total = totalBytes.get()
+            busyProgress = if (total > 0L) {
+                (copied.toFloat() / total.toFloat()).coerceIn(0f, 0.995f)
+            } else {
+                -1f
+            }
+            progressDetail = if (total > 0L) {
+                "${formatBytes(copied)} / ${formatBytes(total)}"
+            } else {
+                "${formatBytes(copied)} disalin"
+            }
+            delay(100)
+        }
+
+        val result = copyTask.await()
+        busyProgress = 1f
+        progressDetail = "Penyalinan dan validasi GGUF selesai · ${formatBytes(result.length())}"
+        return result
     }
 
     private fun loadModel(model: LocalModel) {
@@ -234,6 +311,8 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             isBusy = true
             busyLabel = "Memuat model ke RAM…"
+            busyProgress = 0f
+            progressDetail = "Membaca bobot model dengan llama.cpp"
             errorText = null
             try {
                 val projectorPath = model.projectorPath
@@ -241,13 +320,25 @@ class MainActivity : ComponentActivity() {
                     error("File mmproj tidak ditemukan. Impor ulang projector vision untuk model ini.")
                 }
                 val threads = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(2, 6)
-                val result = withContext(Dispatchers.IO) {
+                val loadTask = async(Dispatchers.IO) {
                     NativeLlama.loadModel(file.absolutePath, projectorPath, 2048, threads)
                 }
+                while (!loadTask.isCompleted) {
+                    val nativeProgress = NativeLlama.loadProgress()
+                    if (nativeProgress >= 0f) {
+                        busyProgress = nativeProgress.coerceIn(0f, 0.995f)
+                        progressDetail = "${(busyProgress * 100f).toInt()}% · Memuat tensor GGUF"
+                    }
+                    delay(100)
+                }
+
+                val result = loadTask.await()
                 if (result != 0) {
                     val detail = withContext(Dispatchers.IO) { NativeLlama.lastError() }
                     error("Gagal memuat model (kode $result). $detail")
                 }
+                busyProgress = 1f
+                progressDetail = "Model, context, dan sampler siap"
                 activeModelId = model.id
                 visionSupported = withContext(Dispatchers.IO) { NativeLlama.hasVision() }
                 visionImageBytes = null
@@ -265,6 +356,8 @@ class MainActivity : ComponentActivity() {
             } finally {
                 isBusy = false
                 busyLabel = ""
+                busyProgress = -1f
+                progressDetail = ""
             }
         }
     }
@@ -329,13 +422,15 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             isBusy = true
             busyLabel = "Memasang projector vision…"
+            busyProgress = 0f
+            progressDetail = "Menyalin file projector"
             errorText = null
             var reload: LocalModel? = null
             try {
                 val targetIndex = models.indexOfFirst { it.id == targetId }
                 require(targetIndex >= 0) { "Model tujuan tidak ditemukan." }
                 val name = displayName(uri)
-                val projector = withContext(Dispatchers.IO) { copyGgufAsset(uri, name, "mmproj") }
+                val projector = copyGgufAssetWithProgress(uri, name, "mmproj")
                 val previous = models[targetIndex]
                 val updated = previous.copy(projectorPath = projector.absolutePath, projectorName = name)
                 models[targetIndex] = updated
@@ -353,6 +448,8 @@ class MainActivity : ComponentActivity() {
             } finally {
                 isBusy = false
                 busyLabel = ""
+                busyProgress = -1f
+                progressDetail = ""
             }
             reload?.let(::loadModel)
         }
@@ -423,7 +520,9 @@ class MainActivity : ComponentActivity() {
         }
 
         isBusy = true
-        busyLabel = "Model sedang memahami gambar…"
+        busyLabel = "Menyiapkan analisis gambar…"
+        busyProgress = 0f
+        progressDetail = "Memproses masukan multimodal di perangkat"
         errorText = null
         visionResult = ""
         lifecycleScope.launch {
@@ -432,19 +531,29 @@ class MainActivity : ComponentActivity() {
                     "You are Nexora Vision, an accurate on-device visual assistant. " +
                     "Describe only visual evidence present in the image. If something is unclear, say so. " +
                     "Answer in the user's language."
-                val result = withContext(Dispatchers.IO) {
+
+                val startedAt = SystemClock.elapsedRealtime()
+                val visionTask = async(Dispatchers.IO) {
                     NativeLlama.startVisionPrompt(systemPrompt, trimmed, image, 512)
                 }
+                while (!visionTask.isCompleted) {
+                    updateInferenceProgress(NativeLlama.inferenceStats(), startedAt, "Memproses input vision")
+                    delay(80)
+                }
+                val result = visionTask.await()
                 if (result != 0) {
                     val detail = withContext(Dispatchers.IO) { NativeLlama.lastError() }
                     error("Vision gagal dimulai (kode $result). $detail")
                 }
+
                 val output = StringBuilder()
                 while (true) {
                     val token = withContext(Dispatchers.IO) { NativeLlama.nextToken() } ?: break
                     output.append(token)
                     visionResult = output.toString()
+                    updateInferenceProgress(NativeLlama.inferenceStats(), startedAt, "Menghasilkan jawaban vision")
                 }
+
                 val generationError = withContext(Dispatchers.IO) { NativeLlama.lastError() }
                 if (generationError.isNotBlank()) errorText = generationError
                 if (output.isEmpty()) {
@@ -454,6 +563,9 @@ class MainActivity : ComponentActivity() {
                         "Analisis gagal: $generationError"
                     }
                 }
+                busyProgress = 1f
+                busyLabel = "Analisis gambar selesai"
+                progressDetail = "Token output aktual: ${NativeLlama.inferenceStats().getOrNull(3) ?: 0}"
                 statusText = "Analisis gambar selesai secara lokal."
             } catch (error: Throwable) {
                 errorText = error.message ?: "Analisis vision gagal."
@@ -461,6 +573,33 @@ class MainActivity : ComponentActivity() {
             } finally {
                 isBusy = false
                 busyLabel = ""
+                busyProgress = -1f
+                progressDetail = ""
+            }
+        }
+    }
+
+    private fun updateInferenceProgress(stats: IntArray, startedAt: Long, inputLabel: String) {
+        val phase = stats.getOrNull(0) ?: 0
+        val inputProcessed = stats.getOrNull(1) ?: 0
+        val inputTotal = stats.getOrNull(2) ?: 0
+        val generated = stats.getOrNull(3) ?: 0
+        val target = stats.getOrNull(4) ?: 0
+
+        when (phase) {
+            1 -> {
+                val ratio = if (inputTotal > 0) inputProcessed.toFloat() / inputTotal else 0f
+                busyProgress = (ratio.coerceIn(0f, 1f) * 0.2f).coerceIn(0f, 0.2f)
+                busyLabel = "$inputLabel: $inputProcessed / $inputTotal"
+                progressDetail = "Token input yang sudah diproses backend native"
+            }
+            2 -> {
+                val ratio = if (target > 0) generated.toFloat() / target else 0f
+                busyProgress = (0.2f + ratio.coerceIn(0f, 1f) * 0.8f).coerceIn(0.2f, 0.995f)
+                val elapsed = ((SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(1L)) / 1000.0
+                val rate = generated / elapsed
+                busyLabel = "Menghasilkan token $generated / $target"
+                progressDetail = String.format(java.util.Locale.getDefault(), "%.1f token/detik", rate)
             }
         }
     }
@@ -511,7 +650,9 @@ class MainActivity : ComponentActivity() {
         messages.add(ChatMessage("user", trimmed))
         messages.add(ChatMessage("assistant", ""))
         isBusy = true
-        busyLabel = "Model sedang menghasilkan token…"
+        busyLabel = "Menyiapkan prompt…"
+        busyProgress = 0f
+        progressDetail = "Token input dan output dihitung dari backend native"
         errorText = null
 
         lifecycleScope.launch {
@@ -525,9 +666,16 @@ class MainActivity : ComponentActivity() {
                             "Produce correct, maintainable, modern code. Explain assumptions and never fabricate test results."
                 }
 
-                val result = withContext(Dispatchers.IO) {
+                val startedAt = SystemClock.elapsedRealtime()
+                val promptTask = async(Dispatchers.IO) {
                     NativeLlama.startPrompt(systemPrompt, trimmed, 512)
                 }
+                while (!promptTask.isCompleted) {
+                    updateInferenceProgress(NativeLlama.inferenceStats(), startedAt, "Memproses prompt")
+                    delay(80)
+                }
+
+                val result = promptTask.await()
                 if (result != 0) {
                     val detail = withContext(Dispatchers.IO) { NativeLlama.lastError() }
                     error("Prompt ditolak (kode $result). $detail")
@@ -539,6 +687,7 @@ class MainActivity : ComponentActivity() {
                     output.append(token)
                     val index = messages.lastIndex
                     if (index >= 0) messages[index] = ChatMessage("assistant", output.toString())
+                    updateInferenceProgress(NativeLlama.inferenceStats(), startedAt, "Menghasilkan jawaban")
                 }
 
                 val generationError = withContext(Dispatchers.IO) { NativeLlama.lastError() }
@@ -556,6 +705,10 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 if (generationError.isNotBlank()) errorText = generationError
+                busyProgress = 1f
+                busyLabel = "Inference selesai"
+                val finalStats = NativeLlama.inferenceStats()
+                progressDetail = "Token output aktual: ${finalStats.getOrNull(3) ?: output.length}"
                 statusText = "Inference selesai secara lokal."
             } catch (error: Throwable) {
                 val index = messages.lastIndex
@@ -566,6 +719,8 @@ class MainActivity : ComponentActivity() {
             } finally {
                 isBusy = false
                 busyLabel = ""
+                busyProgress = -1f
+                progressDetail = ""
             }
         }
     }

@@ -1,6 +1,10 @@
 package com.nexora.ai
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,12 +19,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -33,6 +39,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -65,6 +73,8 @@ internal fun NexoraScreen(
     engineReady: Boolean,
     isBusy: Boolean,
     busyLabel: String,
+    busyProgress: Float,
+    progressDetail: String,
     statusText: String,
     errorText: String?,
     systemInfo: String,
@@ -128,7 +138,18 @@ internal fun NexoraScreen(
             Spacer(Modifier.height(10.dp))
             Text(statusText, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (isBusy && busyLabel.isNotBlank()) {
-                Text(busyLabel, color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
+                Text(busyLabel, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                if (busyProgress >= 0f) {
+                    LinearProgressIndicator(
+                        progress = { busyProgress.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+                if (progressDetail.isNotBlank()) {
+                    Text(progressDetail, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
+                }
             }
         }
     }
@@ -136,15 +157,44 @@ internal fun NexoraScreen(
 
 @Composable
 private fun Header(engineReady: Boolean, activeModelName: String?) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text("NEXORA", color = MaterialTheme.colorScheme.onBackground, fontSize = 22.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
-            Text("PRIVATE ON-DEVICE AI", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, letterSpacing = 1.5.sp)
+    Column(
+        Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "NEXORA",
+                modifier = Modifier.weight(1f),
+                color = MaterialTheme.colorScheme.onBackground,
+                fontSize = 25.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 2.sp,
+                maxLines = 1,
+                softWrap = false
+            )
+            Text(
+                if (engineReady) "ENGINE READY" else "ENGINE OFFLINE",
+                color = if (engineReady) Color(0xFF8FE0B0) else Color(0xFFFFB4AB),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1
+            )
         }
-        Column(horizontalAlignment = Alignment.End) {
-            Text(if (engineReady) "ENGINE READY" else "ENGINE OFFLINE", color = if (engineReady) Color(0xFF8FE0B0) else Color(0xFFFFB4AB), fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-            Text(activeModelName ?: "No model loaded", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
+        Text(
+            "PRIVATE · ON-DEVICE AI",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 10.sp,
+            letterSpacing = 1.5.sp,
+            maxLines = 1
+        )
+        Text(
+            activeModelName ?: "Belum ada model dimuat",
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -215,7 +265,7 @@ private fun ChatPage(
                 Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                messages.forEach { MessageCard(it) }
+                messages.forEach { MessageCard(it, chatMode) }
             }
         }
 
@@ -240,18 +290,116 @@ private fun ChatPage(
     }
 }
 
+private data class MessagePart(
+    val text: String? = null,
+    val language: String? = null,
+    val code: String? = null
+)
+
+private fun splitMessageContent(content: String): List<MessagePart> {
+    val codeFence = Regex("""(?s)\x60\x60\x60([^\n\x60]*)\n(.*?)\x60\x60\x60""")
+    val parts = mutableListOf<MessagePart>()
+    var cursor = 0
+    for (match in codeFence.findAll(content)) {
+        if (match.range.first > cursor) {
+            parts += MessagePart(text = content.substring(cursor, match.range.first))
+        }
+        parts += MessagePart(
+            language = match.groupValues[1].trim().ifBlank { "CODE" },
+            code = match.groupValues[2].trimEnd()
+        )
+        cursor = match.range.last + 1
+    }
+    if (cursor < content.length) parts += MessagePart(text = content.substring(cursor))
+    if (parts.isEmpty()) parts += MessagePart(text = content)
+    return parts
+}
+
+private fun copyText(context: android.content.Context, label: String, value: String) {
+    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
+    Toast.makeText(context, "Disalin ke clipboard", Toast.LENGTH_SHORT).show()
+}
+
 @Composable
-private fun MessageCard(message: ChatMessage) {
+private fun MessageCard(message: ChatMessage, chatMode: ChatMode) {
     val isUser = message.role == "user"
+    val context = LocalContext.current
+    val parts = remember(message.content) { splitMessageContent(message.content) }
     Card(
         Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = if (isUser) Color(0xFF20344D) else MaterialTheme.colorScheme.surface),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isUser) Color(0xFF20344D) else MaterialTheme.colorScheme.surface
+        ),
         shape = RoundedCornerShape(16.dp)
     ) {
-        Column(Modifier.padding(14.dp)) {
-            Text(if (isUser) "ANDA" else "NEXORA", color = MaterialTheme.colorScheme.primary, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-            Spacer(Modifier.height(5.dp))
-            Text(message.content.ifBlank { "…" }, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (isUser) "ANDA" else "NEXORA",
+                    color = MaterialTheme.colorScheme.primary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                )
+                Spacer(Modifier.weight(1f))
+                if (!isUser && message.content.isNotBlank()) {
+                    TextButton(onClick = {
+                        copyText(context, if (chatMode == ChatMode.CODING) "Kode Nexora" else "Jawaban Nexora", message.content)
+                    }) {
+                        Text(if (chatMode == ChatMode.CODING) "Salin hasil" else "Salin", fontSize = 11.sp)
+                    }
+                }
+            }
+
+            if (message.content.isBlank()) {
+                Text("Sedang menulis…", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+            } else {
+                parts.forEach { part ->
+                    if (part.code != null) {
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF09111D)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(Modifier.fillMaxWidth().padding(10.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        part.language ?: "CODE",
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(Modifier.weight(1f))
+                                    TextButton(onClick = {
+                                        copyText(context, "Kode @@{part.language ?: ""}", part.code)
+                                    }) {
+                                        Text("Salin kode", fontSize = 10.sp)
+                                    }
+                                }
+                                SelectionContainer {
+                                    Text(
+                                        part.code,
+                                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                        color = Color(0xFFE2EAF5),
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 12.sp,
+                                        softWrap = false
+                                    )
+                                }
+                            }
+                        }
+                    } else if (!part.text.isNullOrBlank()) {
+                        SelectionContainer {
+                            Text(
+                                part.text,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontSize = 14.sp
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -322,9 +470,6 @@ private fun ModelsPage(
                     }
                 }
             }
-        }
-        if (isBusy && busyLabel.isNotBlank()) {
-            Text(busyLabel, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
         }
     }
 }
