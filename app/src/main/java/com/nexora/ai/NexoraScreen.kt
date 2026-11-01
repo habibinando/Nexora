@@ -167,7 +167,12 @@ internal fun NexoraScreen(
 
             Spacer(Modifier.height(10.dp))
             Text(statusText, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            if (isBusy && busyLabel.isNotBlank()) {
+            if (
+                isBusy &&
+                busyLabel.isNotBlank() &&
+                currentPage != AppPage.CHAT &&
+                currentPage != AppPage.MODELS
+            ) {
                 Text(busyLabel, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 if (busyProgress >= 0f) {
                     LinearProgressIndicator(
@@ -408,7 +413,12 @@ private fun looksLikeSourceCode(content: String): Boolean {
         line.startsWith("}") || line.startsWith(")") || line.endsWith("{") ||
             line.endsWith(";") || line.contains(" = ") || line.startsWith("return ")
     }
-    return declarationCount >= 2 || (declarationCount >= 1 && structuralCount >= 3)
+    val hasQuotedListAssignment = Regex("""(?m)^\\s*[A-Z_][A-Z0-9_]*\\s*=\\s*\\[""")
+        .containsMatchIn(content)
+    val quotedListItems = lines.count { it.startsWith("\\\"") || it.startsWith("'") }
+    return declarationCount >= 2 ||
+        (declarationCount >= 1 && structuralCount >= 3) ||
+        (hasQuotedListAssignment && quotedListItems >= 2)
 }
 
 private fun detectCodeLanguage(content: String): String {
