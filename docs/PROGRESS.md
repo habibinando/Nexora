@@ -242,3 +242,13 @@ Riwayat scope awal dipertahankan sebagai catatan historis; pekerjaan selanjutnya
 - Process death menghapus model dari RAM; GGUF harus dimuat ulang saat aplikasi berjalan kembali.
 - CI compile bukan bukti runtime recovery transcript setelah process death atau seluruh siklus Activity recreation.
 
+
+## Fase 1 — K5: Chat template dan BOS
+
+- CMake mengaktifkan `LLAMA_BUILD_COMMON=ON` pada pinned llama.cpp dan menghubungkan `llama-common`; tools, OpenSSL, subprocess, serta LLGUIDANCE dimatikan karena tidak dipakai Nexora.
+- Prompt chat memakai `common_chat_templates_init()` dan `common_chat_templates_apply()` pada `common/chat.h` pinned, dengan Jinja aktif. Ini memperluas dukungan di luar subset C API `llama_chat_apply_template()`.
+- Jika template tidak disediakan, gagal diparse, atau gagal dirender, inference tetap berjalan dengan fallback ChatML/generik. UI menampilkan peringatan lokal melalui `strings.xml`.
+- BOS ditambahkan hanya ketika metadata `llama_vocab_get_add_bos()` meminta dan token BOS belum menjadi token pertama; template yang sudah mengeluarkan BOS tidak mendapat BOS ganda.
+- System prompt chat/coding pada jalur Activity tetap menggunakan helper `systemPromptForMode()` untuk penyelarasan antara restore dan inference pada refactor yang ada.
+- Llama 3, Gemma, Qwen, dan Mistral sudah dinilai dari jalur API/template; test runtime per model masih memerlukan GGUF dari keluarga tersebut. Tidak mengklaim semua varian tervalidasi empiris.
+

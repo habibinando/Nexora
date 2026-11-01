@@ -3,6 +3,7 @@
 #include <ggml-backend.h>
 #include <mtmd.h>
 #include <mtmd-helper.h>
+#include <chat.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -19,6 +20,8 @@ constexpr int32_t kInferenceBatchCapacity = 256;
 std::mutex g_mutex;
 bool g_backend_initialized = false;
 llama_model *g_model = nullptr;
+common_chat_templates_ptr g_chat_templates;
+std::string g_chat_template_warning;
 std::string g_model_path;
 llama_context *g_context = nullptr;
 mtmd_context *g_mtmd = nullptr;
@@ -113,6 +116,8 @@ void free_model_locked() {
     if (g_batch_initialized) { llama_batch_free(g_batch); g_batch_initialized = false; }
     if (g_mtmd) { mtmd_free(g_mtmd); g_mtmd = nullptr; }
     if (g_context) { llama_free(g_context); g_context = nullptr; }
+    if (g_chat_templates) g_chat_templates.reset();
+    g_chat_template_warning.clear();
     if (g_model) { llama_model_free(g_model); g_model = nullptr; }
     g_model_path.clear();
 }
@@ -149,6 +154,12 @@ std::vector<llama_token> tokenize_locked(const std::string &text) {
                                           tokens.data(), capacity, false, true);
     if (actual < 0) { set_error("Tokenisasi prompt gagal."); return {}; }
     tokens.resize(static_cast<size_t>(actual));
+    if (llama_vocab_get_add_bos(vocab)) {
+        const llama_token bos = llama_vocab_bos(vocab);
+        if (bos != LLAMA_TOKEN_NULL && (tokens.empty() || tokens.front() != bos)) {
+            tokens.insert(tokens.begin(), bos);
+        }
+    }
     return tokens;
 }
 
@@ -246,36 +257,53 @@ size_t prepare_prompt_kv_locked(const std::vector<llama_token> &tokens) {
 }
 
 std::string format_prompt_locked(const std::string &user_message) {
-    std::vector<llama_chat_message> messages;
-    messages.reserve(g_history.size() + 2);
-    if (!g_system_prompt.empty()) messages.push_back({"system", g_system_prompt.c_str()});
-    for (const auto &entry : g_history) messages.push_back({entry.first.c_str(), entry.second.c_str()});
-    messages.push_back({"user", user_message.c_str()});
-
-    const char *chat_template = llama_model_chat_template(g_model, nullptr);
-    if (chat_template && chat_template[0] != '\0') {
-        std::vector<char> output(64 * 1024);
-        int32_t length = llama_chat_apply_template(chat_template, messages.data(), messages.size(),
-                                                   true, output.data(), static_cast<int32_t>(output.size()));
-        if (length < 0) { set_error("Template percakapan model tidak dapat diproses."); return {}; }
-        if (static_cast<size_t>(length) >= output.size()) {
-            output.resize(static_cast<size_t>(length) + 1);
-            length = llama_chat_apply_template(chat_template, messages.data(), messages.size(),
-                                               true, output.data(), static_cast<int32_t>(output.size()));
-            if (length < 0 || static_cast<size_t>(length) >= output.size()) {
-                set_error("Buffer template percakapan tidak mencukupi."); return {};
+    if (g_chat_templates) {
+        try {
+            common_chat_templates_inputs inputs;
+            inputs.add_generation_prompt = true;
+            inputs.use_jinja = true;
+            // Keep BOS rendered in the template; tokenize_locked() inserts it
+            // only if the model requests it and it is not already present.
+            inputs.add_bos = false;
+            inputs.add_eos = false;
+            if (!g_system_prompt.empty()) {
+                common_chat_msg message;
+                message.role = "system";
+                message.content = g_system_prompt;
+                inputs.messages.push_back(std::move(message));
             }
+            for (const auto &entry : g_history) {
+                common_chat_msg message;
+                message.role = entry.first;
+                message.content = entry.second;
+                inputs.messages.push_back(std::move(message));
+            }
+            common_chat_msg user;
+            user.role = "user";
+            user.content = user_message;
+            inputs.messages.push_back(std::move(user));
+
+            const common_chat_params formatted = common_chat_templates_apply(g_chat_templates.get(), inputs);
+            const std::string prompt = formatted.prompt.str();
+            if (!prompt.empty()) return prompt;
+            g_chat_template_warning = "fallback";
+        } catch (const std::exception &) {
+            g_chat_template_warning = "fallback";
+        } catch (...) {
+            g_chat_template_warning = "fallback";
         }
-        return std::string(output.data(), static_cast<size_t>(length));
+    } else {
+        g_chat_template_warning = "fallback";
     }
 
     std::string prompt;
-    if (!g_system_prompt.empty()) prompt += "System: " + g_system_prompt + "\n";
-    for (const auto &entry : g_history) {
-        prompt += entry.first == "assistant" ? "Assistant: " : "User: ";
-        prompt += entry.second + "\n";
+    if (!g_system_prompt.empty()) {
+        prompt += "<|im_start|>system\n" + g_system_prompt + "<|im_end|>\n";
     }
-    prompt += "User: " + user_message + "\nAssistant:";
+    for (const auto &entry : g_history) {
+        prompt += "<|im_start|>" + entry.first + "\n" + entry.second + "<|im_end|>\n";
+    }
+    prompt += "<|im_start|>user\n" + user_message + "<|im_end|>\n<|im_start|>assistant\n";
     return prompt;
 }
 
@@ -430,6 +458,19 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
         return -2;
     }
     g_load_progress.store(0.90f, std::memory_order_relaxed);
+    g_chat_template_warning.clear();
+    try {
+        g_chat_templates = common_chat_templates_init(g_model, "");
+        if (!g_chat_templates || !common_chat_templates_was_explicit(g_chat_templates.get())) {
+            g_chat_template_warning = "fallback";
+        }
+    } catch (const std::exception &) {
+        g_chat_templates.reset();
+        g_chat_template_warning = "fallback";
+    } catch (...) {
+        g_chat_templates.reset();
+        g_chat_template_warning = "fallback";
+    }
 
     const int32_t requested = std::clamp(static_cast<int32_t>(context_size), 512, 100000);
     const int32_t trained = llama_model_n_ctx_train(g_model);
@@ -799,6 +840,12 @@ Java_com_nexora_ai_NativeLlama_benchmarkModelQuantization(JNIEnv *env, jobject) 
     if (!g_model) return to_java_string(env, "");
     const char *quantization = llama_ftype_name(llama_model_ftype(g_model));
     return to_java_string(env, quantization != nullptr ? quantization : "");
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_nexora_ai_NativeLlama_chatTemplateWarning(JNIEnv *env, jobject) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    return to_java_string(env, g_chat_template_warning);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

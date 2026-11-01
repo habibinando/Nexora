@@ -41,4 +41,5 @@ Peak RSS proses: %16$s</string>
     <string name="benchmark_decode_progress">%1$d / %2$d token output diproses</string>
     <string name="benchmark_metrics_note">Prefill mengukur evaluasi token prompt oleh llama_decode; rendering template dan tokenisasi tidak termasuk. Decode mengukur sampling dan evaluasi token output non-EOS. Token EOS tidak dihitung. ru_maxrss adalah high-water mark RSS seluruh proses sejak proses dimulai, bukan delta RAM khusus benchmark dan bukan RAM model saja.</string>
     <string name="not_available">Tidak tersedia</string>
+    <string name="chat_template_fallback_warning">Template bawaan tidak dapat digunakan; memakai fallback ChatML. Format respons mungkin kurang optimal untuk model ini.</string>
 </resources>

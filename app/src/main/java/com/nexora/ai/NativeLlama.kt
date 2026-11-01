@@ -15,6 +15,7 @@ internal object NativeLlama {
     external fun benchmarkStats(): LongArray
     external fun benchmarkModelQuantization(): String
     external fun hasVision(): Boolean
+    external fun chatTemplateWarning(): String
     external fun startVisionPrompt(systemPrompt: String, userMessage: String, imageBytes: ByteArray, maxTokens: Int): Int
     external fun startPrompt(systemPrompt: String, userMessage: String, maxTokens: Int): Int
     external fun nextToken(): String?

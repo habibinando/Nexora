@@ -431,6 +431,9 @@ class MainActivity : ComponentActivity() {
                 activeModelId = model.id
                 benchmarkResult = ""
                 visionSupported = withContext(Dispatchers.IO) { NativeLlama.hasVision() }
+                val templateFallback = withContext(Dispatchers.IO) {
+                    NativeLlama.chatTemplateWarning().isNotBlank()
+                }
                 visionImageBytes = null
                 visionImageName = null
                 synchronizeNativeConversation(model.id)
@@ -438,6 +441,7 @@ class MainActivity : ComponentActivity() {
                 statusText = buildString {
                     append("Model aktif: ${model.name} · Context ${activeContextSize.coerceAtLeast(0)} token")
                     if (visionSupported) append(" · Vision siap")
+                    if (templateFallback) append(" · ").append(getString(R.string.chat_template_fallback_warning))
                 }
             } catch (error: Throwable) {
                 withContext(Dispatchers.IO) { NativeLlama.unload() }
