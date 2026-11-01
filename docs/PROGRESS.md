@@ -9,9 +9,9 @@
 - Branch pekerjaan: `audit/fase-0-baseline`
 - Commit dasar `main`: `8e329c661f83d2a5023d0d9c73ef7d423938d377`
 - Commit branch sebelum audit koreksi ini: `6c202f0cc18842be78842758fdc76cc0b76d8715`
-- Fase aktif: **Fase 0 — B0 (benchmark native)**
-- Status: **BLOCKED — pengukuran pada perangkat ARM64 nyata belum tersedia**
-- Fase 1: **belum dimulai**
+- Fase aktif: **Fase 1 — K1 (release build dan distribusi APK)**
+- B0: instrumentasi tersedia; pengukuran perangkat nyata belum tersedia dan tidak diklaim selesai
+- K1: implementasi konfigurasi release sedang diverifikasi oleh CI
 
 ## Riwayat yang dipertahankan
 
@@ -127,3 +127,21 @@ B0 tetap **BLOCKED** sampai pengukuran tersebut berasal dari perangkat Android A
 ## Batas scope
 
 Perubahan koreksi ini hanya menyentuh instrumentasi benchmark B0, metadata/penyajian hasil, dan dokumentasi progres. Tidak mengerjakan optimasi prefill/KV cache, stop generation, arsitektur ViewModel, release pipeline, atau fase roadmap berikutnya. Tidak membuat branch baru dan tidak menyentuh repository `Nexora2`.
+
+
+## Fase 1 — K1: Release build dan distribusi APK
+
+### Implementasi
+- Build type `release` mengaktifkan R8 dan resource shrinking dengan `proguard-android-optimize.txt`.
+- `NativeLlama` dipertahankan oleh ProGuard agar nama class dan metode JNI tidak berubah setelah minification.
+- Release signing menggunakan environment `NEXORA_RELEASE_*`; workflow dapat menyiapkan keystore dari secret base64 tanpa menulisnya ke repository.
+- Bila secret signing tidak lengkap, release APK memakai Android debug certificate sebagai fallback installable untuk pengujian. Ini bukan sertifikat produksi.
+- Native CMake release dipaksa dengan `CMAKE_BUILD_TYPE=Release` dan compile database diaktifkan. Target JNI mendapat `-O3` khusus konfigurasi Release/RelWithDebInfo.
+- CI menjalankan `clean testDebugUnitTest assembleDebug assembleRelease`, memeriksa kedua APK, tanda tangan, isi ABI ARM64, mapping R8, serta CMakeCache/compile_commands.
+- APK PR diterbitkan sebagai prerelease GitHub Release untuk unduhan langsung. Tidak menggunakan Actions artifact upload.
+
+### Batas verifikasi
+- Run CI untuk commit K1 ini harus lulus sebelum APK hasilnya dianggap tersedia.
+- Bila secret signing belum dipasang, APK release tetap bisa diuji tetapi akan menggunakan debug key.
+- Distribusi Play Store, signing key permanen, dan pengujian install/update pada perangkat tetap memerlukan pemeriksaan terpisah.
+- B0 belum mempunyai angka prefill/decode/load/RSS dari perangkat ARM64 nyata. Status tersebut tetap tercatat; CI tidak dianggap sebagai pengganti benchmark perangkat.

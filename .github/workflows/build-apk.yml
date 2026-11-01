@@ -1,8 +1,6 @@
 name: Nexora Android - Build and Verify
 
 on:
-  # Build once for a PR that changes app/build inputs. Do not run a second
-  # full build merely because the already-tested PR is merged to main.
   pull_request:
     branches: [main, master]
     paths:
@@ -11,7 +9,7 @@ on:
       - "gradle/**"
       - "gradle.properties"
       - ".github/workflows/build-apk.yml"
-  # Publish a nightly APK only when explicitly requested from main.
+      - "README.md"
   workflow_dispatch:
 
 permissions:
@@ -23,7 +21,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build ARM64 APK and run tests
+    name: Build ARM64 APK, release APK and tests
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
@@ -58,6 +56,29 @@ jobs:
             "ndk;29.0.13113456" \
             "cmake;3.31.6"
 
+      - name: Configure optional release signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.NEXORA_RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.NEXORA_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.NEXORA_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.NEXORA_RELEASE_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && \
+             [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            KEYSTORE_PATH="$RUNNER_TEMP/nexora-release.keystore"
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+            test -s "$KEYSTORE_PATH"
+            {
+              echo "NEXORA_RELEASE_STORE_FILE=$KEYSTORE_PATH"
+              echo "NEXORA_RELEASE_STORE_PASSWORD=$STORE_PASSWORD"
+              echo "NEXORA_RELEASE_KEY_ALIAS=$KEY_ALIAS"
+              echo "NEXORA_RELEASE_KEY_PASSWORD=$KEY_PASSWORD"
+            } >> "$GITHUB_ENV"
+            echo "Dedicated release signing configured."
+          else
+            echo "Release signing secrets incomplete; release APK will use the Android debug certificate."
+          fi
+
       - name: Verify wrapper and toolchain
         run: |
           chmod +x ./gradlew
@@ -66,23 +87,89 @@ jobs:
           test -d "$ANDROID_HOME/ndk/29.0.13113456"
           test -d "$ANDROID_HOME/cmake/3.31.6"
 
-      - name: Run unit tests and build APK
-        run: ./gradlew clean testDebugUnitTest assembleDebug --no-daemon --stacktrace
+      - name: Run unit tests and build debug + release APKs
+        run: ./gradlew clean testDebugUnitTest assembleDebug assembleRelease --no-daemon --stacktrace
 
-      - name: Verify APK output
+      - name: Verify APKs, signatures and native Release flags
         run: |
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$APK"
-          file "$APK"
-          mkdir -p release
-          cp "$APK" release/Nexora-ARM64.apk
-          file release/Nexora-ARM64.apk
-          sha256sum release/Nexora-ARM64.apk
-          unzip -l "$APK" | grep -E 'lib/arm64-v8a/lib(nexora-inference|llama|mtmd|ggml)'
-          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libnexora-inference.so'
-          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libllama.so'
-          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmtmd.so'
+          set -euo pipefail
+          DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
+          RELEASE_APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "$DEBUG_APK"
+          test -s "$RELEASE_APK"
 
+          mkdir -p release
+          cp "$DEBUG_APK" release/Nexora-ARM64-debug.apk
+          cp "$RELEASE_APK" release/Nexora-ARM64-release.apk
+
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs "$DEBUG_APK"
+          "$APKSIGNER" verify --verbose --print-certs "$RELEASE_APK"
+
+          for APK in "$DEBUG_APK" "$RELEASE_APK"; do
+            unzip -l "$APK" | grep -q 'lib/arm64-v8a/libnexora-inference.so'
+            unzip -l "$APK" | grep -q 'lib/arm64-v8a/libllama.so'
+            unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmtmd.so'
+          done
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("app/.cxx")
+          caches = list(root.rglob("CMakeCache.txt"))
+          release_caches = []
+          for cache in caches:
+              content = cache.read_text(errors="replace")
+              if "CMAKE_BUILD_TYPE:STRING=Release" in content:
+                  release_caches.append(cache)
+          if not release_caches:
+              raise SystemExit("Tidak ditemukan CMakeCache dengan CMAKE_BUILD_TYPE=Release")
+
+          verified = False
+          for cache in release_caches:
+              compile_db = cache.parent / "compile_commands.json"
+              if not compile_db.is_file():
+                  continue
+              commands = json.loads(compile_db.read_text())
+              for entry in commands:
+                  source = entry.get("file", "")
+                  if not source.endswith("nexora_jni.cpp"):
+                      continue
+                  command = entry.get("command", "")
+                  arguments = entry.get("arguments", [])
+                  flags = command if command else " ".join(arguments)
+                  if "-O3" not in flags:
+                      raise SystemExit(f"Compile flags JNI Release tidak mengandung -O3: {flags}")
+                  verified = True
+                  print(f"Verified native Release: {cache}")
+                  print(f"Verified JNI compile command includes -O3: {source}")
+                  break
+          if not verified:
+              raise SystemExit("Tidak dapat memverifikasi compile_commands untuk nexora_jni.cpp Release")
+          PY
+
+          test -s app/build/outputs/mapping/release/mapping.txt
+          sha256sum release/Nexora-ARM64-debug.apk release/Nexora-ARM64-release.apk
+
+      - name: Publish PR APK download (GitHub Release, no Actions artifact)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          TAG="pr-${PR_NUMBER}-latest"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --cleanup-tag --yes
+          fi
+          gh release create "$TAG" \
+            release/Nexora-ARM64-debug.apk \
+            release/Nexora-ARM64-release.apk \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Nexora PR #${PR_NUMBER} — APK terbaru" \
+            --notes "Build ARM64 dari commit $GITHUB_SHA. APK release memakai signing secrets bila tersedia; jika tidak, memakai debug certificate. Model GGUF tidak disertakan. Impor model sendiri."
 
       - name: Publish rolling nightly APK
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
@@ -91,11 +178,12 @@ jobs:
           tag_name: nightly
           name: Nexora Nightly
           body: |
-            APK ARM64 terbaru dari branch main.
+            APK ARM64 release terbaru dari branch main.
+            Jika signing secrets belum dikonfigurasi, APK ditandatangani dengan debug certificate.
             Model GGUF tidak disertakan. Impor model sendiri setelah memasang aplikasi.
           prerelease: true
           make_latest: false
           overwrite_files: true
-          files: release/Nexora-ARM64.apk
+          files: release/Nexora-ARM64-release.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -37,7 +37,11 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(llama_cpp)
 
 add_library(nexora-inference SHARED nexora_jni.cpp)
-target_compile_options(nexora-inference PRIVATE -O3 -fvisibility=hidden)
+target_compile_options(nexora-inference PRIVATE
+    -fvisibility=hidden
+    $<$<CONFIG:Release>:-O3>
+    $<$<CONFIG:RelWithDebInfo>:-O3>
+)
 if(NEXORA_ENABLE_VULKAN AND ANDROID)
     target_compile_definitions(nexora-inference PRIVATE NEXORA_HAS_VULKAN=1)
 endif()

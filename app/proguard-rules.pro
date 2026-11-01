@@ -19,3 +19,7 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# JNI symbols are resolved by the NativeLlama class/method names in C++.
+# Keep the class and its external native methods stable under R8.
+-keep class com.nexora.ai.NativeLlama { *; }
