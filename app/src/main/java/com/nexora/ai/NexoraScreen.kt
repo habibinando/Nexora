@@ -372,7 +372,7 @@ private fun MessageCard(message: ChatMessage, chatMode: ChatMode) {
                                     )
                                     Spacer(Modifier.weight(1f))
                                     TextButton(onClick = {
-                                        copyText(context, "Kode @@{part.language ?: ""}", part.code)
+                                        copyText(context, "Kode ${part.language ?: ""}", part.code)
                                     }) {
                                         Text("Salin kode", fontSize = 10.sp)
                                     }

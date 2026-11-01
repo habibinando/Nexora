@@ -207,7 +207,7 @@ class MainActivity : ComponentActivity() {
         val directory = File(filesDir, "models").apply { mkdirs() }
         val safeName = requestedName.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val uniqueName = "${prefix}-${System.currentTimeMillis()}-${safeName}"
-        val temporary = File(directory, "$${uniqueName}.partial")
+        val temporary = File(directory, "${uniqueName}.partial")
         val destination = File(directory, uniqueName)
 
         try {
