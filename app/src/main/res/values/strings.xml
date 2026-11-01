@@ -14,14 +14,24 @@
     <string name="benchmark_prompt">Jelaskan secara ringkas bagaimana inferensi model bahasa lokal berjalan di perangkat Android. Jawab dalam bahasa Indonesia dengan kalimat utuh dan lanjutkan sampai batas token.</string>
     <string name="benchmark_not_run">Belum ada hasil. Muat model GGUF lalu jalankan benchmark.</string>
     <string name="benchmark_results_title">Hasil benchmark terakhir</string>
-    <string name="benchmark_result">Model: %1$s
-Prefill: %2$s · %3$s · %4$s token prompt
-Decode: %5$s · %6$s / 128 token aktual · %7$s
-Waktu load model: %8$s
-Peak RSS proses: %9$s</string>
+    <string name="benchmark_result">Perangkat: %1$s
+SoC: %2$s
+RAM perangkat: %3$s
+Model: %4$s
+Quantization: %5$s
+Context aktif: %6$s token · Thread: %7$s
+Prefill: %8$s · %9$s · %10$s token prompt
+Decode: %11$s · %12$s / 128 token output aktual · %13$s
+Alasan berhenti: %14$s
+Waktu load: %15$s
+Peak RSS proses: %16$s</string>
     <string name="benchmark_actual_tokens">%1$s token output aktual · target 128</string>
+    <string name="benchmark_stop_eos">Model mengakhiri generasi dengan EOS; token EOS tidak dihitung sebagai output.</string>
+    <string name="benchmark_stop_output_limit">Batas output 128 token tercapai.</string>
+    <string name="benchmark_stop_context">Ruang context habis sebelum target output tercapai.</string>
+    <string name="benchmark_stop_output_and_context">Batas output 128 token dan kapasitas context tercapai bersamaan.</string>
     <string name="benchmark_prefill_progress">%1$d / %2$d token prompt diproses</string>
     <string name="benchmark_decode_progress">%1$d / %2$d token output diproses</string>
-    <string name="benchmark_metrics_note">Catatan: model dapat mengakhiri output lebih awal dengan EOS, sehingga jumlah aktual bisa kurang dari 128 token. Peak RSS adalah high-water mark proses Android sejak proses dimulai, bukan pengukuran RAM perangkat.</string>
+    <string name="benchmark_metrics_note">Prefill mengukur evaluasi token prompt oleh llama_decode; rendering template dan tokenisasi tidak termasuk. Decode mengukur sampling dan evaluasi token output non-EOS. Token EOS tidak dihitung. ru_maxrss adalah high-water mark RSS seluruh proses sejak proses dimulai, bukan delta RAM khusus benchmark dan bukan RAM model saja.</string>
     <string name="not_available">Tidak tersedia</string>
 </resources>

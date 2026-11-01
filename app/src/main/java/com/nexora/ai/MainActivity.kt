@@ -632,7 +632,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val metrics = withContext(Dispatchers.IO) { NativeLlama.benchmarkStats() }
-                if (metrics.size < 8) error("Data benchmark native tidak lengkap.")
+                if (metrics.size < 11) error("Data benchmark native tidak lengkap.")
 
                 val loadNs = metrics[0]
                 val prefillStart = metrics[1]
@@ -642,16 +642,49 @@ class MainActivity : ComponentActivity() {
                 val decodeEnd = metrics[5]
                 val generatedTokens = metrics[6].coerceAtLeast(0L)
                 val peakRssBytes = metrics[7]
+                val stopFlags = metrics[8]
+                val contextSize = metrics[9].coerceAtLeast(0L)
+                val threadCount = metrics[10].coerceAtLeast(0L)
+
+                val deviceName = listOf(Build.MANUFACTURER, Build.MODEL)
+                    .filter { it.isNotBlank() }
+                    .distinctBy { it.lowercase(java.util.Locale.ROOT) }
+                    .joinToString(" ")
+                    .ifBlank { getString(R.string.not_available) }
+                val socName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    Build.SOC_MODEL
+                } else {
+                    ""
+                }.takeIf { it.isNotBlank() }
+                    ?: Build.HARDWARE.takeIf { it.isNotBlank() }
+                    ?: getString(R.string.not_available)
+                val memoryInfo = ActivityManager.MemoryInfo()
+                (getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(memoryInfo)
+                val totalRam = if (memoryInfo.totalMem > 0L) {
+                    formatBytes(memoryInfo.totalMem)
+                } else {
+                    getString(R.string.not_available)
+                }
+                val quantization = withContext(Dispatchers.IO) {
+                    NativeLlama.benchmarkModelQuantization()
+                }.ifBlank { getString(R.string.not_available) }
 
                 benchmarkResult = getString(
                     R.string.benchmark_result,
+                    deviceName,
+                    socName,
+                    totalRam,
                     activeModel.name,
+                    quantization,
+                    contextSize.toString(),
+                    threadCount.toString(),
                     benchmarkRate(promptTokens, prefillStart, prefillEnd),
                     benchmarkDuration(prefillEnd - prefillStart),
                     promptTokens.toString(),
                     benchmarkRate(generatedTokens, decodeStart, decodeEnd),
                     generatedTokens.toString(),
                     benchmarkDuration(decodeEnd - decodeStart),
+                    benchmarkStopReason(stopFlags),
                     benchmarkDuration(loadNs),
                     if (peakRssBytes > 0L) formatBytes(peakRssBytes) else getString(R.string.not_available)
                 )
@@ -668,6 +701,21 @@ class MainActivity : ComponentActivity() {
                 busyProgress = -1f
                 progressDetail = ""
             }
+        }
+    }
+
+    private fun benchmarkStopReason(flags: Long): String {
+        val reachedEos = (flags and 1L) != 0L
+        val reachedOutputLimit = (flags and 2L) != 0L
+        val reachedContextLimit = (flags and 4L) != 0L
+
+        return when {
+            reachedEos -> getString(R.string.benchmark_stop_eos)
+            reachedOutputLimit && reachedContextLimit ->
+                getString(R.string.benchmark_stop_output_and_context)
+            reachedContextLimit -> getString(R.string.benchmark_stop_context)
+            reachedOutputLimit -> getString(R.string.benchmark_stop_output_limit)
+            else -> getString(R.string.not_available)
         }
     }
 

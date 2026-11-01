@@ -10,6 +10,7 @@ internal object NativeLlama {
     external fun inferenceStats(): IntArray
     external fun runBenchmark(prompt: String, maxTokens: Int): Int
     external fun benchmarkStats(): LongArray
+    external fun benchmarkModelQuantization(): String
     external fun hasVision(): Boolean
     external fun startVisionPrompt(systemPrompt: String, userMessage: String, imageBytes: ByteArray, maxTokens: Int): Int
     external fun startPrompt(systemPrompt: String, userMessage: String, maxTokens: Int): Int

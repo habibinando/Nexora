@@ -1,82 +1,129 @@
 # Nexora — Progress Log
 
-## Status terkini
+## Snapshot terkini
 
-- Tanggal audit: 2026-11-01
+- Tanggal pembaruan: 2026-11-01
 - Repository: `habibinando/Nexora`
-- Branch dasar: `main`
-- Commit dasar yang diaudit: `8e329c661f83d2a5023d0d9c73ef7d423938d377`
-- Branch audit: `audit/fase-0-baseline`
-- Fase aktif: **Fase 0 — Baseline (B0)**
-- Status: **BLOCKED — benchmark perangkat nyata belum dapat diambil**
-- Perubahan aplikasi: **tidak ada**
-- CI baru: **tidak dijalankan** (audit ini hanya membaca kode; tidak ada perubahan build input).
+- PR: [#5 — Fase 0 B0](https://github.com/habibinando/Nexora/pull/5)
+- Base branch: `main`
+- Branch pekerjaan: `audit/fase-0-baseline`
+- Commit dasar `main`: `8e329c661f83d2a5023d0d9c73ef7d423938d377`
+- Commit branch sebelum audit koreksi ini: `6c202f0cc18842be78842758fdc76cc0b76d8715`
+- Fase aktif: **Fase 0 — B0 (benchmark native)**
+- Status: **BLOCKED — pengukuran pada perangkat ARM64 nyata belum tersedia**
+- Fase 1: **belum dimulai**
 
-## Temuan baseline dari source saat ini
+## Riwayat yang dipertahankan
 
-1. `app/src/main/java/com/nexora/ai/NexoraScreen.kt`
-   - `HardwarePage` saat ini hanya menampilkan informasi hardware/RAM dan informasi backend.
-   - Belum ada tombol **Benchmark** atau tampilan hasil benchmark.
-2. `app/src/main/java/com/nexora/ai/NativeLlama.kt` dan `app/src/main/cpp/nexora_jni.cpp`
-   - JNI `inferenceStats()` saat ini hanya mengembalikan fase inferensi, token prompt diproses/total, token output, dan batas output.
-   - Belum ada timestamp native untuk prefill/decode, durasi load, atau peak resident memory (RSS).
-3. `app/src/main/cpp/nexora_jni.cpp`
-   - `decode_tokens_locked()` menggunakan kapasitas batch tetap **32 token**.
-   - Jalur prompt saat ini membangun ulang KV cache pada setiap giliran; belum ada prefix-cache reuse.
-4. `app/src/main/java/com/nexora/ai/MainActivity.kt`
-   - Aplikasi sudah memantau fase/penghitung token untuk progress UI, tetapi data tersebut belum cukup untuk memisahkan throughput prefill dan decode secara valid.
+### Audit awal pada commit dasar `8e329c6`
 
-## B0 — Pengukuran yang diwajibkan
+Temuan berikut benar untuk snapshot source pada commit dasar, bukan deskripsi source branch saat ini:
 
-| Metrik | Hasil baseline |
-|---|---|
-| Model GGUF dan quantization | Belum diukur |
-| Perangkat / SoC / RAM | Belum diukur pada sesi benchmark |
-| Prefill throughput (tok/s) | **Belum tersedia** |
-| Decode throughput (tok/s) | **Belum tersedia** |
-| Waktu load model | **Belum tersedia** |
-| Peak RAM / RSS | **Belum tersedia** |
-| Prompt benchmark | Belum dijalankan |
-| Output benchmark | Target 128 token; belum dijalankan |
+- Halaman Hardware belum mempunyai tombol Benchmark.
+- JNI belum menyediakan timestamp prefill/decode, durasi load model, atau peak RSS.
+- `decode_tokens_locked()` menggunakan batch tetap 32 token.
+- Jalur chat membangun ulang KV cache pada setiap giliran.
 
-Tidak ada angka yang diestimasi atau direkayasa. Benchmark harus dijalankan pada perangkat Android ARM64 yang menjadi target, memakai model yang diimpor pengguna. Build CI di runner bukan pengganti benchmark perangkat karena tidak merepresentasikan SoC, memori, backend, atau kondisi termal perangkat target.
+Pada snapshot audit awal, hanya dokumen progres yang ditambahkan. Catatan historis ini tidak berarti source aplikasi branch sekarang belum berubah.
 
-## Hambatan verifikasi
+### Implementasi instrumentasi pada commit `6c202f0`
 
-- Sesi audit tidak memiliki perangkat Android yang terhubung, `adb` tidak tersedia, serta `ANDROID_HOME`/`ANDROID_SDK_ROOT` belum disetel.
-- Checkout lokal tidak dapat dilakukan karena lingkungan eksekusi tidak dapat menyelesaikan host `github.com`.
-- Tidak ada file model GGUF milik pengguna yang tersedia pada sesi ini.
-- Karena itu tidak mungkin mengukur prefill/decode tok/s, waktu load, atau peak RSS secara jujur.
-- Perintah `./gradlew clean testDebugUnitTest assembleDebug assembleRelease` belum dijalankan pada sesi audit ini. Audit ini tidak mengklaim build lokal berhasil.
+Commit tersebut menambahkan:
 
-## Status CI yang sudah ada (bukan benchmark)
+- JNI `runBenchmark(prompt, maxTokens)` dan `benchmarkStats()`.
+- Prompt tetap melalui `strings.xml`, dengan target output maksimum 128 token.
+- Timestamp native `std::chrono::steady_clock` terpisah untuk prefill dan decode.
+- Durasi pemuatan model.
+- Peak RSS melalui `getrusage(RUSAGE_SELF)`.
+- Tombol dan tampilan hasil benchmark pada halaman Hardware.
+- Penghitungan token prompt dan token output aktual.
+- Penyimpanan/pemulihan riwayat dan system prompt setelah benchmark.
 
-- Commit main saat audit: `8e329c661f83d2a5023d0d9c73ef7d423938d377`.
-- Workflow Android **Nexora Android - Build and Verify** sebelumnya berakhir sukses pada commit `636e6476e00bff8cee724aa8f032dd68249e620a` (run `41312607153`).
-- Run tersebut menjalankan unit test dan build APK debug sesuai workflow saat itu. Itu tidak mengukur performa inference perangkat dan bukan bukti bahwa APK release telah dibangun atau diuji.
+### Status CI yang sudah ada
 
-## Langkah berikutnya — tetap di Fase 0
+- Workflow run: [41317407903](https://github.com/habibinando/Nexora/actions/runs/41317407903)
+- Hasil run yang diperiksa: **SUCCESS**.
+- Job berhasil menyelesaikan unit test, build APK ARM64 debug, dan pemeriksaan output APK.
+- Ini membuktikan build/test pada runner untuk commit yang diuji; ini **bukan** bukti benchmark GGUF berjalan pada perangkat, dan bukan verifikasi release APK.
 
-1. Tambahkan instrumentasi benchmark khusus B0: prompt tetap, tepat 128 token output yang diminta, timestamp native terpisah untuk prefill dan decode, durasi load, dan peak RSS.
-2. Build APK instrumentasi satu kali, lalu jalankan pada perangkat target dengan model GGUF yang dipilih pengguna.
-3. Catat model/quantization, perangkat, konfigurasi thread/context, serta angka aktual ke bagian B0 di dokumen ini.
-4. **Jangan mulai Fase 1 sebelum baseline nyata tercatat.**
+## Audit B0 terhadap implementasi
 
-## Batasan perubahan
+### A. Prefill
 
-Audit ini hanya menambahkan dokumen progres. Tidak mengubah source Kotlin, Compose, JNI/C++, dependency, Gradle, manifest, workflow, llama.cpp pin, atau konfigurasi izin aplikasi. Tidak ada branch lain yang dibuat.
+- Jumlah prompt diambil dari token hasil `tokenize_locked()` setelah chat template diterapkan. Ini adalah jumlah token prompt yang benar-benar dievaluasi.
+- Timestamp prefill dimulai tepat sebelum pemanggilan `decode_tokens_locked()` dan berakhir setelah seluruh batch prompt selesai dievaluasi.
+- Throughput dihitung sebagai token prompt aktual dibagi durasi prefill native.
+- Rendering chat template dan tokenisasi tidak termasuk durasi prefill; hal ini dijelaskan pada catatan hasil.
 
+### B. Decode
 
-## B0 — Instrumentasi benchmark ditambahkan
+- Timestamp dimulai sebelum sampling token output pertama dan berakhir setelah loop generasi.
+- Token output dihitung hanya setelah token non-EOS berhasil dievaluasi oleh `llama_decode()`.
+- Target tetap 128 token.
+- Status akhir membedakan EOS, batas output, kapasitas context, serta kondisi ketika batas output dan context tercapai bersamaan.
+- Posisi KV terakhir yang valid adalah `context_size - 1`; loop benchmark menggunakan pemeriksaan posisi berikutnya `g_position < g_context_size` sehingga tidak kehilangan satu slot context.
 
-- Commit implementasi: akan tercatat pada commit setelah bagian ini.
-- Tambahan native JNI: `runBenchmark(prompt, 128)` dan `benchmarkStats()`.
-- Prompt benchmark tetap diambil dari `strings.xml`; benchmark menggunakan model yang sedang dimuat dan sampler/context native.
-- Pengukuran menggunakan timestamp `std::chrono::steady_clock` dari native untuk awal/akhir prefill dan decode.
-- Waktu load model diukur native sejak masuk hingga keluar dari `loadModel()`.
-- Memori ditampilkan sebagai peak RSS proses melalui `getrusage(RUSAGE_SELF)`, bukan sebagai delta RAM khusus benchmark.
-- Riwayat percakapan native disimpan, KV benchmark dibersihkan setelah pengujian, dan state history/system prompt dipulihkan. Giliran chat berikutnya membangun ulang KV dari riwayat tersebut.
-- Batas decode yang diminta adalah 128 token. Jumlah aktual tetap dilaporkan karena model dapat menghasilkan EOS lebih awal atau context dapat membatasi generasi.
-- Progres UI hanya memakai penghitung token native; tok/s final dihitung dari timestamp native.
-- **Status pengukuran perangkat: masih belum dilakukan.** Instrumentasi bukan pengganti eksekusi pada HP ARM64 dengan model GGUF pengguna. B0 tetap BLOCKED sampai hasil perangkat nyata dicatat.
-- **Validasi build perangkat: belum dijalankan.** Lingkungan sesi tidak menyediakan Android SDK/NDK, ADB, atau akses jaringan untuk checkout repo.
+### C. Waktu load
+
+- Pengukuran native dimulai sesudah argumen JNI diterjemahkan dan model sebelumnya dilepas.
+- Pengukuran berakhir setelah model, context, komponen MTMD bila diminta, batch, dan sampler berhasil diinisialisasi.
+- Durasi tidak lagi mencakup teardown model lama dan tidak menyajikan durasi sukses lama saat proses load gagal.
+
+### D. RAM
+
+- Sumber: `getrusage(RUSAGE_SELF).ru_maxrss`.
+- Satuan Linux/Android yang digunakan: KiB, dikonversi ke byte.
+- Nilai adalah high-water mark RSS seluruh proses sejak proses dimulai. Ini bukan delta RAM khusus benchmark, bukan penggunaan RAM model saja, dan dapat mencakup puncak saat model dimuat.
+
+### E. Isolasi
+
+- Benchmark ditolak bila model/context/sampler belum siap atau generasi normal masih aktif.
+- `g_mutex` menserialisasi benchmark dengan JNI inference normal; benchmark tidak berjalan paralel dengan generasi chat.
+- Riwayat, system prompt, pending buffer, sisa token, serta penghitung/progress native disimpan dan dipulihkan.
+- KV cache benchmark dibersihkan sesudahnya dan posisi dikembalikan ke nol. Giliran chat berikutnya merekonstruksi KV dari riwayat yang dipulihkan.
+- Flag generasi dan phase dikembalikan ke state idle sebelumnya; benchmark tidak meninggalkan `g_generation_active` aktif.
+
+### F. UI dan metadata
+
+- Tombol berada di halaman Hardware dan dinonaktifkan bila tidak ada model aktif atau aplikasi sedang sibuk.
+- Progress memakai penghitung fase/token atomik dari native.
+- Hasil hanya ditampilkan setelah native benchmark selesai tanpa error.
+- Hasil mencatat nama model, quantization dari `llama_model_ftype()`/`llama_ftype_name()`, perangkat, SoC/HW, RAM perangkat, context, jumlah thread, prefill, decode, alasan berhenti, waktu load, dan peak RSS.
+- Tidak ada nilai throughput atau RAM contoh/simulasi.
+
+### G. Kesesuaian API llama.cpp yang dipin
+
+Header pada commit `8642541b255bfb5dc39cd351a178be09013a55d6` telah diperiksa secara langsung:
+
+- `include/llama.h`: API memory clear, EOG detection, sampler reset, model ftype/quantization, dan model metadata tersedia.
+- `tools/mtmd/mtmd.h`: API context MTMD dan pemeriksaan dukungan vision tersedia.
+- `tools/mtmd/mtmd-helper.h`: API helper bitmap dan evaluasi chunk tersedia.
+
+Tidak ada penggantian engine atau perubahan pin llama.cpp.
+
+## Baseline pra-instrumentasi
+
+**Tidak pernah diperoleh.** Tidak ada angka baseline inference lama yang dapat direkonstruksi dari CI atau source. Hasil B0 pertama yang kelak diambil dengan instrumentasi ini harus diberi label sebagai pengukuran pertama pasca-instrumentasi, bukan dibandingkan dengan angka baseline pra-instrumentasi yang tidak ada.
+
+## Verifikasi yang belum dapat dilakukan
+
+- Perintah lokal `./gradlew clean testDebugUnitTest assembleDebug assembleRelease` belum dijalankan pada sesi ini.
+- Lingkungan yang tersedia tidak mempunyai checkout repository, Android SDK/NDK, atau `adb`; hanya JDK 21 terdeteksi.
+- Tidak ada perangkat ARM64 yang terhubung dan tidak ada file GGUF pengguna yang tersedia.
+- Belum ada hasil inference perangkat: prefill tok/s, decode tok/s, load duration, peak RSS, dan jumlah output aktual belum diketahui.
+- Release build belum diverifikasi.
+- CI runner tidak boleh dipakai sebagai pengganti pengukuran perangkat.
+
+## Cara mengambil data B0 pada perangkat
+
+1. Build/install APK dari PR #5 setelah CI untuk commit koreksi ini selesai.
+2. Impor dan muat model GGUF milik pengguna; pastikan model yang dipilih memiliki ruang RAM dan context memadai.
+3. Buka halaman **Perangkat** lalu tekan **Jalankan Benchmark**.
+4. Simpan seluruh hasil yang ditampilkan: perangkat/SoC/RAM, model/quantization, context/thread, prefill tok/s, decode tok/s, durasi load, peak RSS, jumlah token output aktual, dan alasan berhenti.
+5. Sertakan kondisi perangkat saat pengukuran (suhu/thermal, aplikasi lain, status baterai/pengisian, serta apakah perangkat baru selesai memuat model).
+
+B0 tetap **BLOCKED** sampai pengukuran tersebut berasal dari perangkat Android ARM64 nyata dengan GGUF yang benar-benar dimuat. Jangan mulai K1 atau fase berikutnya sebelum hasil ini tersedia.
+
+## Batas scope
+
+Perubahan koreksi ini hanya menyentuh instrumentasi benchmark B0, metadata/penyajian hasil, dan dokumentasi progres. Tidak mengerjakan optimasi prefill/KV cache, stop generation, arsitektur ViewModel, release pipeline, atau fase roadmap berikutnya. Tidak membuat branch baru dan tidak menyentuh repository `Nexora2`.

@@ -23,6 +23,7 @@ llama_sampler *g_sampler = nullptr;
 llama_batch g_batch{};
 bool g_batch_initialized = false;
 int32_t g_context_size = 2048;
+int32_t g_thread_count = 0;
 int32_t g_position = 0;
 int32_t g_remaining_tokens = 0;
 bool g_generation_active = false;
@@ -37,6 +38,11 @@ std::atomic<int32_t> g_generated_tokens{0};
 std::atomic<int32_t> g_generation_limit{0};
 std::atomic<int64_t> g_last_load_duration_ns{0};
 
+constexpr int64_t kBenchmarkStopEos = 1LL << 0;
+constexpr int64_t kBenchmarkStopOutputLimit = 1LL << 1;
+constexpr int64_t kBenchmarkStopContextLimit = 1LL << 2;
+constexpr int64_t kBenchmarkStopDecodeError = 1LL << 3;
+
 struct BenchmarkMetrics {
     int64_t prefill_start_ns = 0;
     int64_t prefill_end_ns = 0;
@@ -45,6 +51,9 @@ struct BenchmarkMetrics {
     int64_t decode_end_ns = 0;
     int64_t generated_tokens = 0;
     int64_t peak_rss_bytes = 0;
+    int64_t stop_flags = 0;
+    int64_t context_size = 0;
+    int64_t thread_count = 0;
 };
 BenchmarkMetrics g_benchmark_metrics{};
 
@@ -61,16 +70,6 @@ int64_t process_peak_rss_bytes() {
     return static_cast<int64_t>(usage.ru_maxrss) * 1024;
 }
 
-struct ScopedLoadTimer {
-    std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
-    ~ScopedLoadTimer() {
-        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - started
-        ).count();
-        g_last_load_duration_ns.store(elapsed, std::memory_order_relaxed);
-    }
-};
-
 bool model_load_progress_callback(float progress, void *) {
     const float safe_progress = std::clamp(progress, 0.0f, 1.0f);
     g_load_progress.store(0.05f + safe_progress * 0.85f, std::memory_order_relaxed);
@@ -84,6 +83,7 @@ void free_model_locked() {
     g_generation_active = false;
     g_remaining_tokens = 0;
     g_position = 0;
+    g_thread_count = 0;
     g_history.clear();
     g_pending_user.clear();
     g_pending_response.clear();
@@ -301,12 +301,14 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_path,
                                          jstring projector_path, jint context_size, jint thread_count) {
     std::lock_guard<std::mutex> guard(g_mutex);
-    ScopedLoadTimer load_timer;
     clear_error();
+    g_last_load_duration_ns.store(0, std::memory_order_relaxed);
+    g_benchmark_metrics = {};
     const std::string path = from_java_string(env, model_path);
     const std::string projector = from_java_string(env, projector_path);
     if (path.empty()) { set_error("Path model tidak valid."); return -1; }
     free_model_locked();
+    const auto load_started = std::chrono::steady_clock::now();
     g_load_progress.store(0.0f, std::memory_order_relaxed);
     llama_model_params model_params = llama_model_default_params();
     model_params.progress_callback = model_load_progress_callback;
@@ -334,8 +336,9 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     params.n_batch = 256;
     params.n_ubatch = 128;
     params.n_seq_max = 1;
-    params.n_threads = std::max(1, static_cast<int32_t>(thread_count));
-    params.n_threads_batch = std::max(1, static_cast<int32_t>(thread_count));
+    const int32_t effective_thread_count = std::max(1, static_cast<int32_t>(thread_count));
+    params.n_threads = effective_thread_count;
+    params.n_threads_batch = effective_thread_count;
     g_context = llama_init_from_model(g_model, params);
     if (!g_context) {
         free_model_locked();
@@ -348,7 +351,7 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     if (!projector.empty()) {
         mtmd_context_params mtmd_params = mtmd_context_params_default();
         mtmd_params.use_gpu = false;
-        mtmd_params.n_threads = std::max(1, static_cast<int32_t>(thread_count));
+        mtmd_params.n_threads = effective_thread_count;
         mtmd_params.print_timings = false;
         mtmd_params.warmup = false;
         g_mtmd = mtmd_init_from_file(projector.c_str(), g_model, mtmd_params);
@@ -376,6 +379,11 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     llama_sampler_chain_add(g_sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
     g_position = 0;
     g_history.clear();
+    g_thread_count = effective_thread_count;
+    const int64_t load_duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - load_started
+    ).count();
+    g_last_load_duration_ns.store(load_duration_ns, std::memory_order_relaxed);
     g_load_progress.store(1.0f, std::memory_order_relaxed);
     return 0;
 }
@@ -434,18 +442,32 @@ Java_com_nexora_ai_NativeLlama_runBenchmark(JNIEnv *env, jobject, jstring prompt
     // history. The next chat turn rebuilds KV from that preserved history.
     std::vector<std::pair<std::string, std::string>> saved_history = g_history;
     const std::string saved_system_prompt = g_system_prompt;
+    const std::string saved_pending_user = g_pending_user;
+    const std::string saved_pending_response = g_pending_response;
+    const std::string saved_utf8_pending = g_utf8_pending;
+    const int32_t saved_remaining_tokens = g_remaining_tokens;
+    const bool saved_generation_active = g_generation_active;
+    const int32_t saved_prompt_processed = g_prompt_processed.load(std::memory_order_relaxed);
+    const int32_t saved_prompt_total = g_prompt_total.load(std::memory_order_relaxed);
+    const int32_t saved_generated_tokens = g_generated_tokens.load(std::memory_order_relaxed);
+    const int32_t saved_generation_limit = g_generation_limit.load(std::memory_order_relaxed);
+    const int32_t saved_inference_phase = g_inference_phase.load(std::memory_order_relaxed);
     auto restore_conversation = [&]() {
         llama_memory_clear(llama_get_memory(g_context), true);
         g_position = 0;
         g_history = std::move(saved_history);
         g_system_prompt = saved_system_prompt;
-        g_generation_active = false;
-        g_remaining_tokens = 0;
-        g_pending_user.clear();
-        g_pending_response.clear();
-        g_utf8_pending.clear();
+        g_generation_active = saved_generation_active;
+        g_remaining_tokens = saved_remaining_tokens;
+        g_pending_user = saved_pending_user;
+        g_pending_response = saved_pending_response;
+        g_utf8_pending = saved_utf8_pending;
+        g_prompt_processed.store(saved_prompt_processed, std::memory_order_relaxed);
+        g_prompt_total.store(saved_prompt_total, std::memory_order_relaxed);
+        g_generated_tokens.store(saved_generated_tokens, std::memory_order_relaxed);
+        g_generation_limit.store(saved_generation_limit, std::memory_order_relaxed);
         llama_sampler_reset(g_sampler);
-        g_inference_phase.store(0, std::memory_order_relaxed);
+        g_inference_phase.store(saved_inference_phase, std::memory_order_relaxed);
     };
 
     llama_memory_clear(llama_get_memory(g_context), true);
@@ -458,6 +480,8 @@ Java_com_nexora_ai_NativeLlama_runBenchmark(JNIEnv *env, jobject, jstring prompt
     g_generated_tokens.store(0, std::memory_order_relaxed);
     g_generation_limit.store(token_limit, std::memory_order_relaxed);
     g_benchmark_metrics = {};
+    g_benchmark_metrics.context_size = g_context_size;
+    g_benchmark_metrics.thread_count = g_thread_count;
 
     const std::string formatted = format_prompt_locked(benchmark_prompt);
     if (formatted.empty()) {
@@ -498,11 +522,16 @@ Java_com_nexora_ai_NativeLlama_runBenchmark(JNIEnv *env, jobject, jstring prompt
 
     int32_t generated = 0;
     int32_t decode_result = 0;
+    int64_t stop_flags = 0;
     const llama_vocab *vocab = llama_model_get_vocab(g_model);
-    while (generated < token_limit && g_position < g_context_size - 1) {
+    // g_position is the next free KV position. Position context_size - 1 is valid.
+    while (generated < token_limit && g_position < g_context_size) {
         const llama_token token = llama_sampler_sample(g_sampler, g_context, -1);
         llama_sampler_accept(g_sampler, token);
-        if (llama_vocab_is_eog(vocab, token)) break;
+        if (llama_vocab_is_eog(vocab, token)) {
+            stop_flags |= kBenchmarkStopEos;
+            break;
+        }
 
         g_batch.n_tokens = 1;
         g_batch.token[0] = token;
@@ -513,6 +542,7 @@ Java_com_nexora_ai_NativeLlama_runBenchmark(JNIEnv *env, jobject, jstring prompt
 
         decode_result = llama_decode(g_context, g_batch);
         if (decode_result != 0) {
+            stop_flags |= kBenchmarkStopDecodeError;
             set_error("llama_decode gagal saat benchmark (kode " +
                       std::to_string(decode_result) + ").");
             break;
@@ -522,8 +552,13 @@ Java_com_nexora_ai_NativeLlama_runBenchmark(JNIEnv *env, jobject, jstring prompt
         g_generated_tokens.store(generated, std::memory_order_relaxed);
     }
 
+    if (decode_result == 0) {
+        if (generated >= token_limit) stop_flags |= kBenchmarkStopOutputLimit;
+        if (g_position >= g_context_size) stop_flags |= kBenchmarkStopContextLimit;
+    }
     g_benchmark_metrics.decode_end_ns = monotonic_time_ns();
     g_benchmark_metrics.generated_tokens = generated;
+    g_benchmark_metrics.stop_flags = stop_flags;
     g_benchmark_metrics.peak_rss_bytes = process_peak_rss_bytes();
     restore_conversation();
 
@@ -534,7 +569,7 @@ Java_com_nexora_ai_NativeLlama_runBenchmark(JNIEnv *env, jobject, jstring prompt
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_com_nexora_ai_NativeLlama_benchmarkStats(JNIEnv *env, jobject) {
     std::lock_guard<std::mutex> guard(g_mutex);
-    const jlong values[8] = {
+    const jlong values[11] = {
         static_cast<jlong>(g_last_load_duration_ns.load(std::memory_order_relaxed)),
         static_cast<jlong>(g_benchmark_metrics.prefill_start_ns),
         static_cast<jlong>(g_benchmark_metrics.prefill_end_ns),
@@ -542,11 +577,22 @@ Java_com_nexora_ai_NativeLlama_benchmarkStats(JNIEnv *env, jobject) {
         static_cast<jlong>(g_benchmark_metrics.decode_start_ns),
         static_cast<jlong>(g_benchmark_metrics.decode_end_ns),
         static_cast<jlong>(g_benchmark_metrics.generated_tokens),
-        static_cast<jlong>(g_benchmark_metrics.peak_rss_bytes)
+        static_cast<jlong>(g_benchmark_metrics.peak_rss_bytes),
+        static_cast<jlong>(g_benchmark_metrics.stop_flags),
+        static_cast<jlong>(g_benchmark_metrics.context_size),
+        static_cast<jlong>(g_benchmark_metrics.thread_count)
     };
-    jlongArray result = env->NewLongArray(8);
-    if (result != nullptr) env->SetLongArrayRegion(result, 0, 8, values);
+    jlongArray result = env->NewLongArray(11);
+    if (result != nullptr) env->SetLongArrayRegion(result, 0, 11, values);
     return result;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_nexora_ai_NativeLlama_benchmarkModelQuantization(JNIEnv *env, jobject) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    if (!g_model) return to_java_string(env, "");
+    const char *quantization = llama_ftype_name(llama_model_ftype(g_model));
+    return to_java_string(env, quantization != nullptr ? quantization : "");
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
