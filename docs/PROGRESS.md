@@ -2,19 +2,21 @@
 
 ## Snapshot terkini
 
-- Tanggal pembaruan: 2026-11-01
+- Tanggal pembaruan: 2026-11-02
 - Repository: `habibinando/Nexora`
-- PR: [#5 — Fase 0 B0](https://github.com/habibinando/Nexora/pull/5)
-- Base branch: `main`
+- PR: [#5 — Android native audit](https://github.com/habibinando/Nexora/pull/5)
+- Base branch: `main` (`8e329c661f83d2a5023d0d9c73ef7d423938d377`)
 - Branch pekerjaan: `audit/fase-0-baseline`
-- Commit dasar `main`: `8e329c661f83d2a5023d0d9c73ef7d423938d377`
-- Commit branch sebelum audit koreksi ini: `6c202f0cc18842be78842758fdc76cc0b76d8715`
-- Fase aktif: **Fase 1 — K4 (ViewModel/state lifecycle)**
-- B0: **MEASURED** — sampel benchmark pertama pasca-instrumentasi tersedia dari Infinix X6725C / UMS9230E
-- B0 baseline pra-instrumentasi: tetap tidak tersedia; sampel 2026-11-01 bukan baseline lama
-- K1: **SUCCESS** — CI `41328386105` lulus untuk unit test, debug/release APK, signature, ARM64 libraries, R8 mapping, CMake Release dan native `-O3`
-- K2: **SUCCESS** — CI `41329301158` lulus untuk unit test, debug/release APK, signature, ARM64 libraries, R8 mapping, CMake Release dan native `-O3`
-- K3: implementasi native/UI terintegrasi; menunggu CI gabungan
+- Head setelah koreksi source K6: `e15beaccbe8a9bd01eac57903b04f3bb58e7152b`
+- B0: **MEASURED — satu sampel pasca-instrumentasi**; baseline pra-instrumentasi tidak tersedia dan hasil belum menjadi benchmark komparatif.
+- K1: **SUCCESS** — release build, R8/resource shrinking, signature verification, ARM64 library, CMake Release, dan JNI `-O3`.
+- K2: **IMPLEMENTED / CI SUCCESS** — batching dan common-prefix KV reuse; kesetaraan output serta peningkatan throughput tetap memerlukan benchmark GGUF berulang.
+- K3: **IMPLEMENTED / CI SUCCESS** — cancellation native/UI; smoke test Stop pada perangkat masih diperlukan.
+- K4: **IMPLEMENTED / CI SUCCESS** — ViewModel, StateFlow, transcript persistence, Activity recreation/process recovery; runtime lifecycle smoke test masih diperlukan.
+- K5: **IMPLEMENTED (source-level)** — chat-template Jinja common API dan penanganan BOS; validasi runtime lintas keluarga model memerlukan GGUF masing-masing.
+- K6: **IMPLEMENTED (source-level), correction added** — estimasi KV/context kini menggunakan key GGUF dengan prefix arsitektur dinamis dan fallback dimensi per-head yang tervalidasi.
+- CI head sebelum koreksi native: run `41353374741` (**SUCCESS**). Koreksi native pada `e15beacc` memerlukan satu verifikasi CI baru; hasil build/APK untuk commit baru belum boleh diasumsikan sebelum run selesai.
+- K7/R1–R7/U1–U4/G1–G3: **belum dikerjakan**; definisi resminya belum ditemukan dalam README, progress log, PR #5, PR historis #1–#4, diskusi/review PR, atau issue repository yang cocok. Tidak ada scope yang ditambahkan berdasarkan tebakan.
 
 ## Riwayat yang dipertahankan
 
@@ -262,6 +264,8 @@ Commit: `41a57b08d74f5bc072cb4fb83dc8ab70c673dd4c`.
 - KV-cache estimates are calculated separately for F16 and a conservative Q8-equivalent estimate; context selection uses available system RAM, a fixed 512 MiB reserve, and a 60% allocation ceiling.
 - Requested context remains bounded by model-trained context and a minimum of 512 tokens.
 - Flash Attention and experimental KV quantization are not enabled implicitly; this change only selects a safer context before `llama_init_from_model`.
-- Runtime validation on physical GGUF models remains required. The current CI gate must confirm the exact pinned llama.cpp header signature and Android build.
+- Follow-up audit correction in commit `e15beaccbe8a9bd01eac57903b04f3bb58e7152b`: metadata keys are built from `general.architecture` instead of hardcoding `llama.*`; missing `attention.head_count_kv` falls back to `attention.head_count`; absent key/value dimensions are derived from `embedding_length / attention.head_count` when divisible. Invalid/incomplete metadata or unavailable memory data now selects the minimum 512-token context rather than bypassing the memory cap.
+- KV byte calculations use checked 64-bit multiplication to avoid overflow silently corrupting the estimate.
+- Runtime validation on physical GGUF models remains required. The current CI gate must confirm the exact pinned llama.cpp header signature and Android build; physical model memory behavior still needs device testing.
 
 K7/R1–R7/U1–U4/G1–G3 remain pending until their definitions are present in repository documentation or PR history; no undocumented scope is being invented.
