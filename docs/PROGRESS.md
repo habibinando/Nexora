@@ -261,7 +261,8 @@ Riwayat scope awal dipertahankan sebagai catatan historis; pekerjaan selanjutnya
 Commit: `41a57b08d74f5bc072cb4fb83dc8ab70c673dd4c`.
 
 - Native context selection now reads GGUF architecture metadata through the pinned llama.cpp public API: block count, KV head count, key/value dimensions, with embedding-length fallback where the model metadata does not expose explicit key/value lengths.
-- KV-cache estimates are calculated separately for F16 and a conservative Q8-equivalent estimate; context selection uses available system RAM, a fixed 512 MiB reserve, and a 60% allocation ceiling.
+- The pinned `llama_context_default_params()` defaults both K and V cache types to `GGML_TYPE_F16`; the estimator and context parameters explicitly use F16 (2 bytes per element). A separate Q8_0 estimate accounts for 34-byte blocks of 32 values, rounding K and V dimensions independently.
+- Context selection budgets 60% of free system RAM after a fixed 512 MiB reserve. This is a heuristic for KV allocation, not a guarantee for total process memory or every model/backend allocation; physical GGUF/device validation remains necessary.
 - Requested context remains bounded by model-trained context and a minimum of 512 tokens.
 - Flash Attention and experimental KV quantization are not enabled implicitly; this change only selects a safer context before `llama_init_from_model`.
 - Follow-up audit correction in commit `e15beaccbe8a9bd01eac57903b04f3bb58e7152b`: metadata keys are built from `general.architecture` instead of hardcoding `llama.*`; missing `attention.head_count_kv` falls back to `attention.head_count`; absent key/value dimensions are derived from `embedding_length / attention.head_count` when divisible. Invalid/incomplete metadata or unavailable memory data now selects the minimum 512-token context rather than bypassing the memory cap.
