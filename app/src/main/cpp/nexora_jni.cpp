@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
@@ -97,17 +98,34 @@ struct ContextBudget {
     bool metadata_complete = false;
 };
 
-bool read_meta_u64(const char * key, uint64_t & value) {
+bool read_meta_string(const std::string & key, std::string & value) {
     if (!g_model) return false;
     char buffer[128] = {};
-    const int32_t size = llama_model_meta_val_str(g_model, key, buffer, sizeof(buffer));
-    if (size <= 0) return false;
+    const int32_t size = llama_model_meta_val_str(g_model, key.c_str(), buffer, sizeof(buffer));
+    if (size <= 0 || static_cast<size_t>(size) >= sizeof(buffer)) return false;
+    value.assign(buffer, static_cast<size_t>(size));
+    return !value.empty();
+}
+
+bool read_meta_u64(const std::string & key, uint64_t & value) {
+    std::string raw;
+    if (!read_meta_string(key, raw)) return false;
+    if (raw.find_first_not_of("0123456789") != std::string::npos) return false;
     try {
-        value = std::stoull(std::string(buffer, static_cast<size_t>(size)));
+        size_t parsed_length = 0;
+        const uint64_t parsed_value = std::stoull(raw, &parsed_length, 10);
+        if (parsed_length != raw.size()) return false;
+        value = parsed_value;
         return true;
     } catch (...) {
         return false;
     }
+}
+
+bool checked_multiply_u64(uint64_t left, uint64_t right, uint64_t & result) {
+    if (left != 0 && right > std::numeric_limits<uint64_t>::max() / left) return false;
+    result = left * right;
+    return true;
 }
 
 uint64_t available_memory_bytes() {
@@ -117,32 +135,108 @@ uint64_t available_memory_bytes() {
 }
 
 ContextBudget choose_safe_context(int32_t requested, int32_t trained) {
+    constexpr uint64_t kMemoryReserveBytes = 512ULL << 20;
+    constexpr uint64_t kMemoryBudgetPercent = 60;
+
     ContextBudget budget;
     budget.requested = std::clamp(requested, 512, 100000);
     budget.trained = trained;
     budget.available_bytes = available_memory_bytes();
-    uint64_t layers = 0, kv_heads = 0, head_dim = 0, key_length = 0, value_length = 0;
-    const bool ok = read_meta_u64("llama.block_count", layers) &&
-                    read_meta_u64("llama.attention.head_count_kv", kv_heads) &&
-                    (read_meta_u64("llama.attention.key_length", key_length) ||
-                     read_meta_u64("llama.embedding_length", head_dim)) &&
-                    (read_meta_u64("llama.attention.value_length", value_length) ||
-                     read_meta_u64("llama.embedding_length", head_dim));
-    if (head_dim == 0) head_dim = key_length;
-    if (value_length == 0) value_length = head_dim;
-    const uint64_t per_token_f16 = layers * kv_heads * (key_length + value_length) * sizeof(float);
-    const uint64_t per_token_q8 = per_token_f16 / 2;
-    budget.kv_bytes_f16 = per_token_f16;
-    budget.kv_bytes_q8 = per_token_q8;
-    budget.metadata_complete = ok && per_token_f16 > 0;
-    const uint64_t headroom = budget.available_bytes > (512ULL << 20)
-        ? budget.available_bytes - (512ULL << 20) : 0;
-    const uint64_t conservative = headroom * 60 / 100;
-    int32_t safe = budget.requested;
-    if (budget.metadata_complete && per_token_f16 > 0 && conservative > 0) {
-        const uint64_t max_tokens = conservative / per_token_f16;
-        safe = std::min<int32_t>(safe, static_cast<int32_t>(std::min<uint64_t>(max_tokens, 100000)));
+
+    std::string architecture;
+    if (!read_meta_string("general.architecture", architecture)) {
+        budget.selected = 512;
+        return budget;
     }
+
+    // GGUF model keys are namespaced by general.architecture (for example,
+    // llama.block_count or qwen2.block_count), not universally by "llama".
+    const std::string prefix = architecture + ".";
+    uint64_t layers = 0;
+    uint64_t attention_heads = 0;
+    uint64_t kv_heads = 0;
+    uint64_t embedding_length = 0;
+    uint64_t key_length = 0;
+    uint64_t value_length = 0;
+
+    const bool have_layers = read_meta_u64(prefix + "block_count", layers) && layers > 0;
+    const bool have_attention_heads =
+        read_meta_u64(prefix + "attention.head_count", attention_heads) && attention_heads > 0;
+    const bool have_kv_heads = read_meta_u64(prefix + "attention.head_count_kv", kv_heads);
+    if ((!have_kv_heads || kv_heads == 0) && have_attention_heads) {
+        // head_count_kv is optional for architectures using ordinary MHA.
+        kv_heads = attention_heads;
+    }
+
+    const bool have_key_length =
+        read_meta_u64(prefix + "attention.key_length", key_length) && key_length > 0;
+    const bool have_value_length =
+        read_meta_u64(prefix + "attention.value_length", value_length) && value_length > 0;
+
+    if (!have_key_length || !have_value_length) {
+        const bool have_embedding =
+            read_meta_u64(prefix + "embedding_length", embedding_length) && embedding_length > 0;
+        uint64_t derived_head_dim = 0;
+        if (have_embedding && have_attention_heads &&
+            embedding_length % attention_heads == 0) {
+            derived_head_dim = embedding_length / attention_heads;
+        }
+
+        // Prefer an architecture-derived per-head dimension. If the model
+        // omits embedding/head metadata too, reuse the known KV dimension
+        // rather than treating the whole embedding width as a head width.
+        if (!have_key_length) {
+            key_length = derived_head_dim > 0 ? derived_head_dim : value_length;
+        }
+        if (!have_value_length) {
+            value_length = derived_head_dim > 0 ? derived_head_dim : key_length;
+        }
+    }
+
+    uint64_t per_token_f16 = 0;
+    uint64_t layer_heads = 0;
+    uint64_t total_kv_elements = 0;
+    uint64_t kv_width = 0;
+    const bool dimensions_valid =
+        key_length > 0 &&
+        value_length > 0 &&
+        key_length <= std::numeric_limits<uint64_t>::max() - value_length;
+    if (dimensions_valid) kv_width = key_length + value_length;
+
+    const bool estimate_valid =
+        have_layers &&
+        have_attention_heads &&
+        kv_heads > 0 &&
+        dimensions_valid &&
+        checked_multiply_u64(layers, kv_heads, layer_heads) &&
+        checked_multiply_u64(layer_heads, kv_width, total_kv_elements) &&
+        checked_multiply_u64(total_kv_elements, sizeof(float), per_token_f16);
+
+    budget.metadata_complete = estimate_valid && per_token_f16 > 0;
+    if (budget.metadata_complete) {
+        budget.kv_bytes_f16 = per_token_f16;
+        budget.kv_bytes_q8 = per_token_f16 / 2;
+    }
+
+    const uint64_t headroom = budget.available_bytes > kMemoryReserveBytes
+        ? budget.available_bytes - kMemoryReserveBytes : 0;
+    const uint64_t conservative_budget =
+        (headroom / 100) * kMemoryBudgetPercent +
+        ((headroom % 100) * kMemoryBudgetPercent) / 100;
+
+    int32_t safe = budget.requested;
+    if (!budget.metadata_complete || conservative_budget == 0) {
+        // Missing/invalid metadata or unavailable RAM data must not silently
+        // bypass the context safety limit.
+        safe = 512;
+    } else {
+        const uint64_t max_tokens = conservative_budget / per_token_f16;
+        safe = std::min<int32_t>(
+            safe,
+            static_cast<int32_t>(std::min<uint64_t>(max_tokens, 100000))
+        );
+    }
+
     if (trained > 0) safe = std::min(safe, trained);
     budget.selected = std::max(512, safe);
     return budget;
