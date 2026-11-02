@@ -128,6 +128,12 @@ bool checked_multiply_u64(uint64_t left, uint64_t right, uint64_t & result) {
     return true;
 }
 
+bool checked_add_u64(uint64_t left, uint64_t right, uint64_t & result) {
+    if (right > std::numeric_limits<uint64_t>::max() - left) return false;
+    result = left + right;
+    return true;
+}
+
 uint64_t available_memory_bytes() {
     struct sysinfo info {};
     if (sysinfo(&info) != 0) return 0;
@@ -205,17 +211,34 @@ ContextBudget choose_safe_context(int32_t requested, int32_t trained) {
 
     const bool estimate_valid =
         have_layers &&
-        have_attention_heads &&
         kv_heads > 0 &&
         dimensions_valid &&
         checked_multiply_u64(layers, kv_heads, layer_heads) &&
         checked_multiply_u64(layer_heads, kv_width, total_kv_elements) &&
-        checked_multiply_u64(total_kv_elements, sizeof(float), per_token_f16);
+        // llama_context_default_params() in the pinned llama.cpp revision
+        // defaults both K and V cache types to GGML_TYPE_F16 (2 bytes/value).
+        checked_multiply_u64(total_kv_elements, sizeof(uint16_t), per_token_f16);
 
     budget.metadata_complete = estimate_valid && per_token_f16 > 0;
     if (budget.metadata_complete) {
         budget.kv_bytes_f16 = per_token_f16;
-        budget.kv_bytes_q8 = per_token_f16 / 2;
+
+        // Q8_0 stores 32 quantized values plus one 16-bit scale (34 bytes).
+        // Round K and V dimensions independently because each row is blocked.
+        constexpr uint64_t kQ8BlockElements = 32;
+        constexpr uint64_t kQ8BlockBytes = 34;
+        const uint64_t key_blocks = key_length / kQ8BlockElements +
+            (key_length % kQ8BlockElements == 0 ? 0 : 1);
+        const uint64_t value_blocks = value_length / kQ8BlockElements +
+            (value_length % kQ8BlockElements == 0 ? 0 : 1);
+        uint64_t blocks_per_head = 0;
+        uint64_t q8_bytes_per_head = 0;
+        uint64_t q8_bytes_per_token = 0;
+        if (checked_add_u64(key_blocks, value_blocks, blocks_per_head) &&
+            checked_multiply_u64(blocks_per_head, kQ8BlockBytes, q8_bytes_per_head) &&
+            checked_multiply_u64(layer_heads, q8_bytes_per_head, q8_bytes_per_token)) {
+            budget.kv_bytes_q8 = q8_bytes_per_token;
+        }
     }
 
     const uint64_t headroom = budget.available_bytes > kMemoryReserveBytes
@@ -635,6 +658,9 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     g_context_size = budget.selected;
 
     llama_context_params params = llama_context_default_params();
+    // Keep the memory estimator and actual cache allocation in sync.
+    params.type_k = GGML_TYPE_F16;
+    params.type_v = GGML_TYPE_F16;
     params.n_ctx = static_cast<uint32_t>(g_context_size);
     params.n_batch = kInferenceBatchCapacity;
     params.n_ubatch = kInferenceBatchCapacity;
