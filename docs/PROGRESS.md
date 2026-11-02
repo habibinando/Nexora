@@ -272,3 +272,14 @@ Commit: `41a57b08d74f5bc072cb4fb83dc8ab70c673dd4c`.
 - Runtime validation on physical GGUF models remains required. The current CI gate must confirm the exact pinned llama.cpp header signature and Android build; physical model memory behavior still needs device testing.
 
 K7/R1–R7/U1–U4/G1–G3 remain pending until their definitions are present in repository documentation or PR history; no undocumented scope is being invented.
+
+
+## Fase 2 — Unified Chat, Vision transcript, and Agent Skills
+
+- Chat and image analysis share one conversation composer and timeline. Image attachment is offered only when the active GGUF + mmproj combination reports vision support.
+- Vision questions and assistant responses are appended to the local transcript. After image processing, the text transcript is restored into native history because the current MTMD path is one-shot and does not persist image embeddings in KV/history.
+- Added a bounded tool-call envelope and allowlisted runtime for calculator, current_time, web_search, and web_open. Tool results are fed into the next local inference pass. Maximum three tool executions per user turn.
+- Web access is disabled by default and can be enabled on the Skills page. Added Android INTERNET permission. Web calls enforce HTTPS-only destinations, redirect/time/response limits, and reject obvious localhost/private-host URL forms. This is not a general-purpose unrestricted browser.
+- Tool protocol is model-dependent: imported GGUF models must emit the documented Nexora tool-call envelope. Unsupported models continue to work as ordinary text models; tool use is not guaranteed across all model families.
+- No image-generation or image-editing diffusion engine is included in this phase. MTMD remains an image-understanding input path, not an image generator.
+- Vulkan build activation remains a separate native-build gate: the pinned ggml Vulkan backend requires host glslc and a SPIRV-Headers CMake package in addition to Android Vulkan headers/loader. It must not be marked active until CI packages the backend and runtime enumeration confirms a usable Vulkan device. Existing CPU behavior remains available.

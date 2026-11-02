@@ -30,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -105,7 +106,9 @@ internal fun NexoraScreen(
     onAnalyzeVision: (String) -> Unit,
     onSendMessage: (String) -> Unit,
     onNewChat: () -> Unit,
-    onDismissError: () -> Unit
+    onDismissError: () -> Unit,
+    networkToolsEnabled: Boolean,
+    onNetworkToolsChanged: (Boolean) -> Unit
 ) {
     Surface(
         Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding(),
@@ -149,7 +152,12 @@ internal fun NexoraScreen(
                         onMaxOutputTokensChange = onMaxOutputTokensChange,
                         onModeSelected = onModeSelected,
                         onSendMessage = onSendMessage,
-                        onNewChat = onNewChat
+                        onNewChat = onNewChat,
+                        visionReady = visionReady,
+                        visionImageName = visionImageName,
+                        isVisionImageSelected = isVisionImageSelected,
+                        onPickVisionImage = onPickVisionImage,
+                        onAnalyzeVision = onAnalyzeVision
                     )
                     AppPage.MODELS -> ModelsPage(
                         models = models,
@@ -173,9 +181,9 @@ internal fun NexoraScreen(
                         isBusy = isBusy,
                         onRunBenchmark = onRunBenchmark
                     )
-                    AppPage.VISION -> VisionPage(
-                        visionReady, visionImageName, visionResult, isVisionImageSelected,
-                        isBusy, canStopGeneration, onStopGeneration, onPickVisionImage, onAnalyzeVision
+                    AppPage.SKILLS -> SkillsPage(
+                        networkToolsEnabled = networkToolsEnabled,
+                        onNetworkToolsChanged = onNetworkToolsChanged
                     )
                 }
             }
@@ -287,7 +295,12 @@ private fun ChatPage(
     onMaxOutputTokensChange: (Int) -> Unit,
     onModeSelected: (ChatMode) -> Unit,
     onSendMessage: (String) -> Unit,
-    onNewChat: () -> Unit
+    onNewChat: () -> Unit,
+    visionReady: Boolean,
+    visionImageName: String?,
+    isVisionImageSelected: Boolean,
+    onPickVisionImage: () -> Unit,
+    onAnalyzeVision: (String) -> Unit
 ) {
     var input by rememberSaveable { mutableStateOf("") }
     var showGenerationSettings by remember { mutableStateOf(false) }
@@ -380,20 +393,49 @@ private fun ChatPage(
         }
 
         Spacer(Modifier.height(10.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            TextButton(onClick = onPickVisionImage, enabled = visionReady && !isBusy) {
+                Text(if (isVisionImageSelected) "Ganti gambar" else "＋ Gambar")
+            }
+            Text(
+                when {
+                    isVisionImageSelected -> "Terlampir: ${visionImageName ?: "gambar"}"
+                    visionReady -> "Lampirkan gambar untuk dianalisis di chat"
+                    else -> "Model aktif tidak menyediakan Vision"
+                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+        }
         OutlinedTextField(
             value = input,
             onValueChange = { input = it },
             modifier = Modifier.fillMaxWidth(),
             enabled = activeModelId != null && !isBusy,
-            placeholder = { Text("Tulis pesan…") },
+            placeholder = { Text(if (isVisionImageSelected) "Tulis pertanyaan tentang gambar…" else "Tulis pesan…") },
             minLines = 2,
             maxLines = 5,
             shape = RoundedCornerShape(16.dp)
         )
         Spacer(Modifier.height(8.dp))
         Button(
-            onClick = { val text = input; input = ""; onSendMessage(text) },
-            enabled = activeModelId != null && !isBusy && input.isNotBlank(),
+            onClick = {
+                val text = input
+                input = ""
+                if (isVisionImageSelected) {
+                    onAnalyzeVision(text.ifBlank { "Jelaskan isi gambar ini secara detail." })
+                } else {
+                    onSendMessage(text)
+                }
+            },
+            enabled = activeModelId != null && !isBusy && (input.isNotBlank() || isVisionImageSelected),
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(14.dp)
         ) { Text(if (isBusy) "Memproses…" else "Kirim") }
@@ -742,77 +784,65 @@ private fun HardwarePage(
 }
 
 @Composable
-private fun VisionPage(
-    visionReady: Boolean,
-    imageName: String?,
-    result: String,
-    imageSelected: Boolean,
-    isBusy: Boolean,
-    canStopGeneration: Boolean,
-    onStopGeneration: () -> Unit,
-    onPickImage: () -> Unit,
-    onAnalyze: (String) -> Unit
+private fun SkillsPage(
+    networkToolsEnabled: Boolean,
+    onNetworkToolsChanged: (Boolean) -> Unit
 ) {
-    var question by rememberSaveable { mutableStateOf("Jelaskan isi gambar ini secara detail.") }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("VISION", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        if (!visionReady) {
-            EmptyState(
-                "Vision belum siap",
-                "Muat model multimodal yang kompatibel dan impor file mmproj pasangannya melalui Model Manager. Model teks biasa tidak dapat menganalisis gambar."
-            )
-        } else {
-            Text(
-                "Pemrosesan gambar berjalan di perangkat melalui encoder vision llama.cpp. File gambar tidak dikirim ke server.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 12.sp
-            )
-            Button(
-                onClick = onPickImage,
-                enabled = !isBusy,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Text(if (imageSelected) "Ganti Gambar" else "Pilih Gambar")
-            }
-            Text(
-                imageName ?: "Belum ada gambar dipilih",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 12.sp
-            )
-            OutlinedTextField(
-                value = question,
-                onValueChange = { question = it },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !isBusy,
-                label = { Text("Pertanyaan tentang gambar") },
-                minLines = 2,
-                maxLines = 5,
-                shape = RoundedCornerShape(16.dp)
-            )
-            Button(
-                onClick = { onAnalyze(question) },
-                enabled = imageSelected && !isBusy && question.isNotBlank(),
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Text(if (isBusy) "Menganalisis…" else "Analisis Gambar")
-            }
-            if (canStopGeneration) {
-                TextButton(
-                    onClick = onStopGeneration,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(stringResource(R.string.generation_stop))
+        Text("SKILLS & TOOLS", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Text(
+            "Kemampuan yang dapat dipanggil model melalui tool runtime Nexora. Tool lokal tidak membutuhkan internet.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp
+        )
+        Card(
+            Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Web Search & Browser", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Pencarian DuckDuckGo dan pembacaan halaman HTTPS. Query hanya dikirim ketika model memanggil tool.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Switch(checked = networkToolsEnabled, onCheckedChange = onNetworkToolsChanged)
                 }
-            }
-            if (result.isNotBlank()) {
-                InfoCard("Hasil analisis lokal", result)
+                Text(
+                    if (networkToolsEnabled) "Akses web diizinkan." else "Akses web dinonaktifkan.",
+                    color = MaterialTheme.colorScheme.primary,
+                    fontSize = 11.sp
+                )
             }
         }
+        val localTools = listOf(
+            "Calculator" to "Menghitung ekspresi matematika melalui parser aritmetika terbatas, bukan eval kode.",
+            "Current Time" to "Membaca tanggal dan waktu lokal perangkat."
+        )
+        localTools.forEach { (name, description) ->
+            Card(
+                Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(name, fontWeight = FontWeight.SemiBold)
+                    Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                }
+            }
+        }
+        Text(
+            "Tool diproses melalui daftar izin internal. Nexora tidak menjalankan perintah shell atau kode arbitrer dari model.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 11.sp
+        )
     }
 }
 

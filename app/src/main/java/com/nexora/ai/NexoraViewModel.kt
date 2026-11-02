@@ -37,6 +37,7 @@ internal data class NexoraUiState(
     val systemInfo: String = "Backend belum diinisialisasi.",
     val hardwareInfo: String = "Memeriksa perangkat…",
     val errorText: String? = null,
+    val networkToolsEnabled: Boolean = false,
     val visionSupported: Boolean = false,
     val visionImageName: String? = null,
     val visionImageBytes: ByteArray? = null,

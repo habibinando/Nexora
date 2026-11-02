@@ -14,17 +14,25 @@ Nexora is an Android-native, offline-first GGUF inference app. It does not ship 
 - Show live generation status, token count and throughput in a collapsible progress panel; move the completed response into the normal message view.
 - Render fenced code and detect common unfenced source-code responses in Coding mode, with per-block and whole-response copy actions.
 - Display Android ABI, CPU core count, RAM availability and llama.cpp runtime information.
+- Use one conversation timeline for text, coding, and multimodal image questions.
+- Invoke allowlisted local tools through a bounded tool-call protocol: calculator and device local time.
+- Optionally enable Web Search and HTTPS page reading; network access is opt-in and only used when the model requests a registered tool.
+- Manage tool availability from the Skills page.
 - Run multimodal image understanding with the upstream llama.cpp MTMD vision encoder when a compatible projector (mmproj) is imported.
 
 ## No default model
 
-The initial model list is empty. Nexora contains no bundled weights and performs no automatic model selection or model download. Imported model files remain in app-private storage and are never uploaded.
+The initial model list is empty. Nexora contains no bundled weights and performs no automatic model selection or model download. Imported model files remain in app-private storage and are never uploaded. Chat prompts are processed by the locally imported model. When the user enables Web Search, only the specific search query or requested public HTTPS page is sent to the web endpoint; no prompt is sent to a hosted LLM.
 
 ## Runtime
 
 The native runtime is fetched from the official ggml-org/llama.cpp repository at the fixed commit associated with release v0.8.0 (8642541b255bfb5dc39cd351a178be09013a55d6). This project calls the real llama.cpp model loading, tokenization, decoding, sampling and chat-template APIs. Vision builds the upstream MTMD library and uses its image preprocessing and image-embedding evaluation APIs. There is no deterministic, scripted, RGB-statistic, or fabricated response fallback.
 
 The default distributable build targets arm64-v8a and uses llama.cpp's ARM CPU backend with KleidiAI optimizations where supported. Snapdragon and MediaTek devices can run this CPU path. Vulkan is an optional native build configuration and is not advertised as enabled in the default CPU APK. Actual GPU acceleration requires a successful Vulkan build and a compatible device driver.
+
+## Agent tools and network privacy
+
+The Skills page exposes a small allowlisted tool registry. Calculator uses a bounded arithmetic parser (no shell, script engine, or arbitrary code execution); Current Time reads the device clock. Web Search and Web Open are disabled by default and must be enabled by the user. They use DuckDuckGo HTML search and public HTTPS pages, enforce request timeouts, response-size limits and redirect limits, reject non-HTTPS and obvious local/private host names, and return excerpts to the local model. Only the arguments for a requested tool call are sent externally. Tool calling is best-effort and depends on the imported model following Nexora's explicit tool-call envelope; models without reliable structured output may not invoke tools correctly. A per-message tool-call budget is enforced.
 
 ## Model compatibility and memory
 
