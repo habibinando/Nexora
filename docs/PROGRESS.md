@@ -7,16 +7,16 @@
 - PR: [#5 — Android native audit](https://github.com/habibinando/Nexora/pull/5)
 - Base branch: `main` (`8e329c661f83d2a5023d0d9c73ef7d423938d377`)
 - Branch pekerjaan: `audit/fase-0-baseline`
-- Head setelah koreksi source K6: `e15beaccbe8a9bd01eac57903b04f3bb58e7152b`
+- Head sumber aplikasi/workflow: `aba78fb601fd13f9a2e39852be8260468f7e77fe` (perubahan dokumentasi berikutnya tidak mengubah source atau workflow).
 - B0: **MEASURED — satu sampel pasca-instrumentasi**; baseline pra-instrumentasi tidak tersedia dan hasil belum menjadi benchmark komparatif.
 - K1: **SUCCESS** — release build, R8/resource shrinking, signature verification, ARM64 library, CMake Release, dan JNI `-O3`.
 - K2: **IMPLEMENTED / CI SUCCESS** — batching dan common-prefix KV reuse; kesetaraan output serta peningkatan throughput tetap memerlukan benchmark GGUF berulang.
 - K3: **IMPLEMENTED / CI SUCCESS** — cancellation native/UI; smoke test Stop pada perangkat masih diperlukan.
 - K4: **IMPLEMENTED / CI SUCCESS** — ViewModel, StateFlow, transcript persistence, Activity recreation/process recovery; runtime lifecycle smoke test masih diperlukan.
 - K5: **IMPLEMENTED (source-level)** — chat-template Jinja common API dan penanganan BOS; validasi runtime lintas keluarga model memerlukan GGUF masing-masing.
-- K6: **IMPLEMENTED (source-level), correction added** — estimasi KV/context kini menggunakan key GGUF dengan prefix arsitektur dinamis dan fallback dimensi per-head yang tervalidasi.
-- CI head sebelum koreksi native: run `41353374741` (**SUCCESS**). Koreksi native pada `e15beacc` memerlukan satu verifikasi CI baru; hasil build/APK untuk commit baru belum boleh diasumsikan sebelum run selesai.
-- K7/R1–R7/U1–U4/G1–G3: **belum dikerjakan**; definisi resminya belum ditemukan dalam README, progress log, PR #5, PR historis #1–#4, diskusi/review PR, atau issue repository yang cocok. Tidak ada scope yang ditambahkan berdasarkan tebakan.
+- K6: **IMPLEMENTED (source-level), corrections added** — metadata key memakai prefix dari `general.architecture`, fallback dimensi per-head, F16 2-byte yang disamakan eksplisit dengan tipe cache aktual, dan estimasi Q8_0 34-byte/32-value block.
+- Run `41402872067` / #69 (**SUCCESS**) memverifikasi source arsitektur-dinamis sebelum koreksi ukuran F16. Run #71 dibatalkan saat manifest diperbarui, dan #72 dibatalkan ketika workflow action diperbarui. Run final #73 (`41404288063`) sedang memverifikasi head `aba78fb`; jangan menganggap hasil final tersedia sebelum selesai.
+- K7/R1–R7/U1–U4/G1–G3: **belum dikerjakan**; definisi resminya belum ditemukan dalam README, progress log, PR #5, PR historis #1–#4, diskusi/review PR, atau issue repository yang cocok. Tidak ada scope yang ditambahkan berdasarkan tebakan. Verifikasi fisik GGUF, Stop, lifecycle, dan penggunaan RAM tetap memerlukan smoke test perangkat.
 
 ## Riwayat yang dipertahankan
 
@@ -265,8 +265,10 @@ Commit: `41a57b08d74f5bc072cb4fb83dc8ab70c673dd4c`.
 - Context selection budgets 60% of free system RAM after a fixed 512 MiB reserve. This is a heuristic for KV allocation, not a guarantee for total process memory or every model/backend allocation; physical GGUF/device validation remains necessary.
 - Requested context remains bounded by model-trained context and a minimum of 512 tokens.
 - Flash Attention and experimental KV quantization are not enabled implicitly; this change only selects a safer context before `llama_init_from_model`.
-- Follow-up audit correction in commit `e15beaccbe8a9bd01eac57903b04f3bb58e7152b`: metadata keys are built from `general.architecture` instead of hardcoding `llama.*`; missing `attention.head_count_kv` falls back to `attention.head_count`; absent key/value dimensions are derived from `embedding_length / attention.head_count` when divisible. Invalid/incomplete metadata or unavailable memory data now selects the minimum 512-token context rather than bypassing the memory cap.
-- KV byte calculations use checked 64-bit multiplication to avoid overflow silently corrupting the estimate.
+- Follow-up audit correction in commit `e15beaccbe8a9bd01eac57903b04f3bb58e7152b`: metadata keys are built from `general.architecture` instead of hardcoding `llama.*`; missing `attention.head_count_kv` falls back to `attention.head_count`; absent key/value dimensions are derived from `embedding_length / attention.head_count` when divisible.
+- Follow-up estimate correction in commit `9392b9c5fa50d0bc518b62f7c1f5a45c92d82827`: F16 bytes/token use 2 bytes/value, matching pinned llama.cpp defaults, and context params explicitly set both K/V caches to F16. Q8_0 estimate uses 34 bytes per 32-value block and rounds the K/V rows independently. Checked 64-bit arithmetic prevents overflow.
+- The 512 MiB reserve and 60% free-memory budget remain a heuristic, not a guarantee for total process RSS, backend graph buffers, or every architecture.
+- Build cleanup: explicit `android:extractNativeLibs` removed in favor of existing `jniLibs.useLegacyPackaging`; workflow action versions advanced to `actions/setup-java@v6` and `gradle/actions/setup-gradle@v6`.
 - Runtime validation on physical GGUF models remains required. The current CI gate must confirm the exact pinned llama.cpp header signature and Android build; physical model memory behavior still needs device testing.
 
 K7/R1–R7/U1–U4/G1–G3 remain pending until their definitions are present in repository documentation or PR history; no undocumented scope is being invented.
