@@ -3,29 +3,45 @@
 #include <ggml-backend.h>
 #include <mtmd.h>
 #include <mtmd-helper.h>
+#include <chat.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <mutex>
+#include <sys/resource.h>
+#include <sys/sysinfo.h>
+#include <cmath>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace {
+constexpr int32_t kInferenceBatchCapacity = 256;
 std::mutex g_mutex;
 bool g_backend_initialized = false;
 llama_model *g_model = nullptr;
+common_chat_templates_ptr g_chat_templates;
+std::string g_chat_template_warning;
+std::string g_model_path;
 llama_context *g_context = nullptr;
 mtmd_context *g_mtmd = nullptr;
 llama_sampler *g_sampler = nullptr;
 llama_batch g_batch{};
 bool g_batch_initialized = false;
 int32_t g_context_size = 2048;
+int32_t g_thread_count = 0;
 int32_t g_position = 0;
 int32_t g_remaining_tokens = 0;
 bool g_generation_active = false;
+std::atomic<bool> g_cancel_requested{false};
+std::atomic<bool> g_generation_cancelled{false};
 std::string g_system_prompt;
 std::vector<std::pair<std::string, std::string>> g_history;
+// Token IDs in sequence 0, matching the currently populated KV positions.
+std::vector<llama_token> g_kv_cache_tokens;
 std::string g_pending_user, g_pending_response, g_utf8_pending, g_last_error;
 std::atomic<float> g_load_progress{-1.0f};
 std::atomic<int32_t> g_inference_phase{0}; // 0 idle, 1 input/prefill, 2 token generation
@@ -33,6 +49,221 @@ std::atomic<int32_t> g_prompt_processed{0};
 std::atomic<int32_t> g_prompt_total{0};
 std::atomic<int32_t> g_generated_tokens{0};
 std::atomic<int32_t> g_generation_limit{0};
+std::atomic<int32_t> g_prompt_cache_reused{0};
+std::atomic<int64_t> g_last_load_duration_ns{0};
+
+constexpr int64_t kBenchmarkStopEos = 1LL << 0;
+constexpr int64_t kBenchmarkStopOutputLimit = 1LL << 1;
+constexpr int64_t kBenchmarkStopContextLimit = 1LL << 2;
+constexpr int64_t kBenchmarkStopDecodeError = 1LL << 3;
+
+struct BenchmarkMetrics {
+    int64_t prefill_start_ns = 0;
+    int64_t prefill_end_ns = 0;
+    int64_t prompt_tokens = 0;
+    int64_t decode_start_ns = 0;
+    int64_t decode_end_ns = 0;
+    int64_t generated_tokens = 0;
+    int64_t peak_rss_bytes = 0;
+    int64_t stop_flags = 0;
+    int64_t context_size = 0;
+    int64_t thread_count = 0;
+};
+BenchmarkMetrics g_benchmark_metrics{};
+
+int64_t monotonic_time_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()
+    ).count();
+}
+
+int64_t process_peak_rss_bytes() {
+    struct rusage usage {};
+    if (getrusage(RUSAGE_SELF, &usage) != 0 || usage.ru_maxrss <= 0) return 0;
+    // Linux and Android report ru_maxrss in KiB.
+    return static_cast<int64_t>(usage.ru_maxrss) * 1024;
+}
+
+bool native_abort_callback(void *) {
+    return g_cancel_requested.load(std::memory_order_relaxed);
+}
+
+struct ContextBudget {
+    int32_t requested = 0;
+    int32_t trained = 0;
+    int32_t selected = 0;
+    uint64_t kv_bytes_f16 = 0;
+    uint64_t kv_bytes_q8 = 0;
+    uint64_t available_bytes = 0;
+    bool metadata_complete = false;
+};
+
+bool read_meta_string(const std::string & key, std::string & value) {
+    if (!g_model) return false;
+    char buffer[128] = {};
+    const int32_t size = llama_model_meta_val_str(g_model, key.c_str(), buffer, sizeof(buffer));
+    if (size <= 0 || static_cast<size_t>(size) >= sizeof(buffer)) return false;
+    value.assign(buffer, static_cast<size_t>(size));
+    return !value.empty();
+}
+
+bool read_meta_u64(const std::string & key, uint64_t & value) {
+    std::string raw;
+    if (!read_meta_string(key, raw)) return false;
+    if (raw.find_first_not_of("0123456789") != std::string::npos) return false;
+    try {
+        size_t parsed_length = 0;
+        const uint64_t parsed_value = std::stoull(raw, &parsed_length, 10);
+        if (parsed_length != raw.size()) return false;
+        value = parsed_value;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool checked_multiply_u64(uint64_t left, uint64_t right, uint64_t & result) {
+    if (left != 0 && right > std::numeric_limits<uint64_t>::max() / left) return false;
+    result = left * right;
+    return true;
+}
+
+bool checked_add_u64(uint64_t left, uint64_t right, uint64_t & result) {
+    if (right > std::numeric_limits<uint64_t>::max() - left) return false;
+    result = left + right;
+    return true;
+}
+
+uint64_t available_memory_bytes() {
+    struct sysinfo info {};
+    if (sysinfo(&info) != 0) return 0;
+    return static_cast<uint64_t>(info.freeram) * static_cast<uint64_t>(info.mem_unit);
+}
+
+ContextBudget choose_safe_context(int32_t requested, int32_t trained) {
+    constexpr uint64_t kMemoryReserveBytes = 512ULL << 20;
+    constexpr uint64_t kMemoryBudgetPercent = 60;
+
+    ContextBudget budget;
+    budget.requested = std::clamp(requested, 512, 100000);
+    budget.trained = trained;
+    budget.available_bytes = available_memory_bytes();
+
+    std::string architecture;
+    if (!read_meta_string("general.architecture", architecture)) {
+        budget.selected = 512;
+        return budget;
+    }
+
+    // GGUF model keys are namespaced by general.architecture (for example,
+    // llama.block_count or qwen2.block_count), not universally by "llama".
+    const std::string prefix = architecture + ".";
+    uint64_t layers = 0;
+    uint64_t attention_heads = 0;
+    uint64_t kv_heads = 0;
+    uint64_t embedding_length = 0;
+    uint64_t key_length = 0;
+    uint64_t value_length = 0;
+
+    const bool have_layers = read_meta_u64(prefix + "block_count", layers) && layers > 0;
+    const bool have_attention_heads =
+        read_meta_u64(prefix + "attention.head_count", attention_heads) && attention_heads > 0;
+    const bool have_kv_heads = read_meta_u64(prefix + "attention.head_count_kv", kv_heads);
+    if ((!have_kv_heads || kv_heads == 0) && have_attention_heads) {
+        // head_count_kv is optional for architectures using ordinary MHA.
+        kv_heads = attention_heads;
+    }
+
+    const bool have_key_length =
+        read_meta_u64(prefix + "attention.key_length", key_length) && key_length > 0;
+    const bool have_value_length =
+        read_meta_u64(prefix + "attention.value_length", value_length) && value_length > 0;
+
+    if (!have_key_length || !have_value_length) {
+        const bool have_embedding =
+            read_meta_u64(prefix + "embedding_length", embedding_length) && embedding_length > 0;
+        uint64_t derived_head_dim = 0;
+        if (have_embedding && have_attention_heads &&
+            embedding_length % attention_heads == 0) {
+            derived_head_dim = embedding_length / attention_heads;
+        }
+
+        // Prefer an architecture-derived per-head dimension. If the model
+        // omits embedding/head metadata too, reuse the known KV dimension
+        // rather than treating the whole embedding width as a head width.
+        if (!have_key_length) {
+            key_length = derived_head_dim > 0 ? derived_head_dim : value_length;
+        }
+        if (!have_value_length) {
+            value_length = derived_head_dim > 0 ? derived_head_dim : key_length;
+        }
+    }
+
+    uint64_t per_token_f16 = 0;
+    uint64_t layer_heads = 0;
+    uint64_t total_kv_elements = 0;
+    uint64_t kv_width = 0;
+    const bool dimensions_valid =
+        key_length > 0 &&
+        value_length > 0 &&
+        key_length <= std::numeric_limits<uint64_t>::max() - value_length;
+    if (dimensions_valid) kv_width = key_length + value_length;
+
+    const bool estimate_valid =
+        have_layers &&
+        kv_heads > 0 &&
+        dimensions_valid &&
+        checked_multiply_u64(layers, kv_heads, layer_heads) &&
+        checked_multiply_u64(layer_heads, kv_width, total_kv_elements) &&
+        // llama_context_default_params() in the pinned llama.cpp revision
+        // defaults both K and V cache types to GGML_TYPE_F16 (2 bytes/value).
+        checked_multiply_u64(total_kv_elements, sizeof(uint16_t), per_token_f16);
+
+    budget.metadata_complete = estimate_valid && per_token_f16 > 0;
+    if (budget.metadata_complete) {
+        budget.kv_bytes_f16 = per_token_f16;
+
+        // Q8_0 stores 32 quantized values plus one 16-bit scale (34 bytes).
+        // Round K and V dimensions independently because each row is blocked.
+        constexpr uint64_t kQ8BlockElements = 32;
+        constexpr uint64_t kQ8BlockBytes = 34;
+        const uint64_t key_blocks = key_length / kQ8BlockElements +
+            (key_length % kQ8BlockElements == 0 ? 0 : 1);
+        const uint64_t value_blocks = value_length / kQ8BlockElements +
+            (value_length % kQ8BlockElements == 0 ? 0 : 1);
+        uint64_t blocks_per_head = 0;
+        uint64_t q8_bytes_per_head = 0;
+        uint64_t q8_bytes_per_token = 0;
+        if (checked_add_u64(key_blocks, value_blocks, blocks_per_head) &&
+            checked_multiply_u64(blocks_per_head, kQ8BlockBytes, q8_bytes_per_head) &&
+            checked_multiply_u64(layer_heads, q8_bytes_per_head, q8_bytes_per_token)) {
+            budget.kv_bytes_q8 = q8_bytes_per_token;
+        }
+    }
+
+    const uint64_t headroom = budget.available_bytes > kMemoryReserveBytes
+        ? budget.available_bytes - kMemoryReserveBytes : 0;
+    const uint64_t conservative_budget =
+        (headroom / 100) * kMemoryBudgetPercent +
+        ((headroom % 100) * kMemoryBudgetPercent) / 100;
+
+    int32_t safe = budget.requested;
+    if (!budget.metadata_complete || conservative_budget == 0) {
+        // Missing/invalid metadata or unavailable RAM data must not silently
+        // bypass the context safety limit.
+        safe = 512;
+    } else {
+        const uint64_t max_tokens = conservative_budget / per_token_f16;
+        safe = std::min<int32_t>(
+            safe,
+            static_cast<int32_t>(std::min<uint64_t>(max_tokens, 100000))
+        );
+    }
+
+    if (trained > 0) safe = std::min(safe, trained);
+    budget.selected = std::max(512, safe);
+    return budget;
+}
 
 bool model_load_progress_callback(float progress, void *) {
     const float safe_progress = std::clamp(progress, 0.0f, 1.0f);
@@ -45,9 +276,14 @@ void clear_error() { g_last_error.clear(); }
 
 void free_model_locked() {
     g_generation_active = false;
+    g_cancel_requested.store(false, std::memory_order_relaxed);
+    g_generation_cancelled.store(false, std::memory_order_relaxed);
     g_remaining_tokens = 0;
     g_position = 0;
+    g_thread_count = 0;
     g_history.clear();
+    g_kv_cache_tokens.clear();
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
     g_pending_user.clear();
     g_pending_response.clear();
     g_utf8_pending.clear();
@@ -60,7 +296,10 @@ void free_model_locked() {
     if (g_batch_initialized) { llama_batch_free(g_batch); g_batch_initialized = false; }
     if (g_mtmd) { mtmd_free(g_mtmd); g_mtmd = nullptr; }
     if (g_context) { llama_free(g_context); g_context = nullptr; }
+    if (g_chat_templates) g_chat_templates.reset();
+    g_chat_template_warning.clear();
     if (g_model) { llama_model_free(g_model); g_model = nullptr; }
+    g_model_path.clear();
 }
 
 bool valid_utf8(const std::string &value) {
@@ -95,17 +334,28 @@ std::vector<llama_token> tokenize_locked(const std::string &text) {
                                           tokens.data(), capacity, false, true);
     if (actual < 0) { set_error("Tokenisasi prompt gagal."); return {}; }
     tokens.resize(static_cast<size_t>(actual));
+    if (llama_vocab_get_add_bos(vocab)) {
+        const llama_token bos = llama_vocab_bos(vocab);
+        if (bos != LLAMA_TOKEN_NULL && (tokens.empty() || tokens.front() != bos)) {
+            tokens.insert(tokens.begin(), bos);
+        }
+    }
     return tokens;
 }
 
 bool decode_tokens_locked(const std::vector<llama_token> &tokens) {
     if (!g_context || !g_batch_initialized) { set_error("Model belum dimuat."); return false; }
-    constexpr int32_t capacity = 32;
+    constexpr int32_t capacity = kInferenceBatchCapacity;
     g_prompt_processed.store(0, std::memory_order_relaxed);
     g_prompt_total.store(static_cast<int32_t>(tokens.size()), std::memory_order_relaxed);
     g_inference_phase.store(1, std::memory_order_relaxed);
     size_t offset = 0;
     while (offset < tokens.size()) {
+        if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+            g_generation_cancelled.store(true, std::memory_order_relaxed);
+            set_error("Generasi dihentikan oleh pengguna saat memproses prompt.");
+            return false;
+        }
         const int32_t count = static_cast<int32_t>(
             std::min(tokens.size() - offset, static_cast<size_t>(capacity)));
         g_batch.n_tokens = count;
@@ -118,7 +368,17 @@ bool decode_tokens_locked(const std::vector<llama_token> &tokens) {
         }
         const int32_t result = llama_decode(g_context, g_batch);
         if (result != 0) {
-            set_error("llama_decode gagal memproses prompt (kode " + std::to_string(result) + ").");
+            if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+                g_generation_cancelled.store(true, std::memory_order_relaxed);
+                set_error("Generasi dihentikan oleh pengguna saat memproses prompt.");
+            } else {
+                set_error("llama_decode gagal memproses prompt (kode " + std::to_string(result) + ").");
+            }
+            return false;
+        }
+        if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+            g_generation_cancelled.store(true, std::memory_order_relaxed);
+            set_error("Generasi dihentikan oleh pengguna saat memproses prompt.");
             return false;
         }
         g_position += count;
@@ -128,37 +388,102 @@ bool decode_tokens_locked(const std::vector<llama_token> &tokens) {
     return true;
 }
 
-std::string format_prompt_locked(const std::string &user_message) {
-    std::vector<llama_chat_message> messages;
-    messages.reserve(g_history.size() + 2);
-    if (!g_system_prompt.empty()) messages.push_back({"system", g_system_prompt.c_str()});
-    for (const auto &entry : g_history) messages.push_back({entry.first.c_str(), entry.second.c_str()});
-    messages.push_back({"user", user_message.c_str()});
+size_t common_prefix_length(
+    const std::vector<llama_token> &cached,
+    const std::vector<llama_token> &incoming
+) {
+    const size_t limit = std::min(cached.size(), incoming.size());
+    size_t common = 0;
+    while (common < limit && cached[common] == incoming[common]) ++common;
+    return common;
+}
 
-    const char *chat_template = llama_model_chat_template(g_model, nullptr);
-    if (chat_template && chat_template[0] != '\0') {
-        std::vector<char> output(64 * 1024);
-        int32_t length = llama_chat_apply_template(chat_template, messages.data(), messages.size(),
-                                                   true, output.data(), static_cast<int32_t>(output.size()));
-        if (length < 0) { set_error("Template percakapan model tidak dapat diproses."); return {}; }
-        if (static_cast<size_t>(length) >= output.size()) {
-            output.resize(static_cast<size_t>(length) + 1);
-            length = llama_chat_apply_template(chat_template, messages.data(), messages.size(),
-                                               true, output.data(), static_cast<int32_t>(output.size()));
-            if (length < 0 || static_cast<size_t>(length) >= output.size()) {
-                set_error("Buffer template percakapan tidak mencukupi."); return {};
-            }
+// Reuse only a prefix represented by the saved token IDs in KV sequence 0.
+// Re-evaluate at least the final prompt token so the sampler has fresh logits.
+size_t prepare_prompt_kv_locked(const std::vector<llama_token> &tokens) {
+    if (!g_context || tokens.empty()) return 0;
+
+    const size_t common = common_prefix_length(g_kv_cache_tokens, tokens);
+    const size_t reusable = std::min(common, tokens.size() - 1);
+    llama_memory_t memory = llama_get_memory(g_context);
+
+    if (reusable == 0) {
+        llama_memory_clear(memory, true);
+        g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+        return 0;
+    }
+
+    if (reusable < g_kv_cache_tokens.size()) {
+        const bool removed = llama_memory_seq_rm(
+            memory, 0, static_cast<llama_pos>(reusable), -1
+        );
+        if (!removed) {
+            // Some architectures cannot remove a partial sequence. Clear all KV
+            // rather than let token IDs and KV positions silently diverge.
+            llama_memory_clear(memory, true);
+            g_position = 0;
+            g_kv_cache_tokens.clear();
+            g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+            return 0;
         }
-        return std::string(output.data(), static_cast<size_t>(length));
+        g_kv_cache_tokens.resize(reusable);
+    }
+
+    g_position = static_cast<int32_t>(reusable);
+    g_prompt_cache_reused.store(static_cast<int32_t>(reusable), std::memory_order_relaxed);
+    return reusable;
+}
+
+std::string format_prompt_locked(const std::string &user_message) {
+    if (g_chat_templates) {
+        try {
+            common_chat_templates_inputs inputs;
+            inputs.add_generation_prompt = true;
+            inputs.use_jinja = true;
+            // Keep BOS rendered in the template; tokenize_locked() inserts it
+            // only if the model requests it and it is not already present.
+            inputs.add_bos = false;
+            inputs.add_eos = false;
+            if (!g_system_prompt.empty()) {
+                common_chat_msg message;
+                message.role = "system";
+                message.content = g_system_prompt;
+                inputs.messages.push_back(std::move(message));
+            }
+            for (const auto &entry : g_history) {
+                common_chat_msg message;
+                message.role = entry.first;
+                message.content = entry.second;
+                inputs.messages.push_back(std::move(message));
+            }
+            common_chat_msg user;
+            user.role = "user";
+            user.content = user_message;
+            inputs.messages.push_back(std::move(user));
+
+            const common_chat_params formatted = common_chat_templates_apply(g_chat_templates.get(), inputs);
+            const std::string prompt = formatted.prompt.str();
+            if (!prompt.empty()) return prompt;
+            g_chat_template_warning = "fallback";
+        } catch (const std::exception &) {
+            g_chat_template_warning = "fallback";
+        } catch (...) {
+            g_chat_template_warning = "fallback";
+        }
+    } else {
+        g_chat_template_warning = "fallback";
     }
 
     std::string prompt;
-    if (!g_system_prompt.empty()) prompt += "System: " + g_system_prompt + "\n";
-    for (const auto &entry : g_history) {
-        prompt += entry.first == "assistant" ? "Assistant: " : "User: ";
-        prompt += entry.second + "\n";
+    if (!g_system_prompt.empty()) {
+        prompt += "<|im_start|>system\n" + g_system_prompt + "<|im_end|>\n";
     }
-    prompt += "User: " + user_message + "\nAssistant:";
+    for (const auto &entry : g_history) {
+        prompt += "<|im_start|>" + entry.first + "\n" + entry.second + "<|im_end|>\n";
+    }
+    prompt += "<|im_start|>user\n" + user_message + "<|im_end|>\n<|im_start|>assistant\n";
     return prompt;
 }
 
@@ -174,6 +499,31 @@ void finish_generation_locked() {
     g_remaining_tokens = 0;
     g_generation_active = false;
     g_inference_phase.store(0, std::memory_order_relaxed);
+}
+
+void cancel_generation_locked() {
+    g_cancel_requested.store(false, std::memory_order_relaxed);
+    g_generation_cancelled.store(true, std::memory_order_relaxed);
+    set_error("Generasi dihentikan oleh pengguna.");
+
+    if (g_context) llama_memory_clear(llama_get_memory(g_context), true);
+    g_position = 0;
+    g_kv_cache_tokens.clear();
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+
+    if (g_generation_active) {
+        finish_generation_locked();
+    } else {
+        if (!g_pending_user.empty()) {
+            g_history.emplace_back("user", g_pending_user);
+            g_history.emplace_back("assistant", g_pending_response);
+        }
+        g_pending_user.clear();
+        g_pending_response.clear();
+        g_utf8_pending.clear();
+        g_remaining_tokens = 0;
+        g_inference_phase.store(0, std::memory_order_relaxed);
+    }
 }
 
 std::string from_java_string(JNIEnv *env, jstring value) {
@@ -265,10 +615,13 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
                                          jstring projector_path, jint context_size, jint thread_count) {
     std::lock_guard<std::mutex> guard(g_mutex);
     clear_error();
+    g_last_load_duration_ns.store(0, std::memory_order_relaxed);
+    g_benchmark_metrics = {};
     const std::string path = from_java_string(env, model_path);
     const std::string projector = from_java_string(env, projector_path);
     if (path.empty()) { set_error("Path model tidak valid."); return -1; }
     free_model_locked();
+    const auto load_started = std::chrono::steady_clock::now();
     g_load_progress.store(0.0f, std::memory_order_relaxed);
     llama_model_params model_params = llama_model_default_params();
     model_params.progress_callback = model_load_progress_callback;
@@ -285,19 +638,36 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
         return -2;
     }
     g_load_progress.store(0.90f, std::memory_order_relaxed);
+    g_chat_template_warning.clear();
+    try {
+        g_chat_templates = common_chat_templates_init(g_model, "");
+        if (!g_chat_templates || !common_chat_templates_was_explicit(g_chat_templates.get())) {
+            g_chat_template_warning = "fallback";
+        }
+    } catch (const std::exception &) {
+        g_chat_templates.reset();
+        g_chat_template_warning = "fallback";
+    } catch (...) {
+        g_chat_templates.reset();
+        g_chat_template_warning = "fallback";
+    }
 
     const int32_t requested = std::clamp(static_cast<int32_t>(context_size), 512, 100000);
     const int32_t trained = llama_model_n_ctx_train(g_model);
-    g_context_size = trained > 0 ? std::min(requested, trained) : requested;
-    g_context_size = std::max(512, g_context_size);
+    const ContextBudget budget = choose_safe_context(requested, trained);
+    g_context_size = budget.selected;
 
     llama_context_params params = llama_context_default_params();
+    // Keep the memory estimator and actual cache allocation in sync.
+    params.type_k = GGML_TYPE_F16;
+    params.type_v = GGML_TYPE_F16;
     params.n_ctx = static_cast<uint32_t>(g_context_size);
-    params.n_batch = 256;
-    params.n_ubatch = 128;
+    params.n_batch = kInferenceBatchCapacity;
+    params.n_ubatch = kInferenceBatchCapacity;
     params.n_seq_max = 1;
-    params.n_threads = std::max(1, static_cast<int32_t>(thread_count));
-    params.n_threads_batch = std::max(1, static_cast<int32_t>(thread_count));
+    const int32_t effective_thread_count = std::max(1, static_cast<int32_t>(thread_count));
+    params.n_threads = effective_thread_count;
+    params.n_threads_batch = effective_thread_count;
     g_context = llama_init_from_model(g_model, params);
     if (!g_context) {
         free_model_locked();
@@ -305,12 +675,16 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
         set_error("Gagal mengalokasikan context. Coba model lebih kecil atau context 1024.");
         return -3;
     }
+#if !defined(NEXORA_HAS_VULKAN)
+    // llama.cpp documents this callback as CPU-execution-only.
+    llama_set_abort_callback(g_context, native_abort_callback, nullptr);
+#endif
     g_load_progress.store(0.93f, std::memory_order_relaxed);
 
     if (!projector.empty()) {
         mtmd_context_params mtmd_params = mtmd_context_params_default();
         mtmd_params.use_gpu = false;
-        mtmd_params.n_threads = std::max(1, static_cast<int32_t>(thread_count));
+        mtmd_params.n_threads = effective_thread_count;
         mtmd_params.print_timings = false;
         mtmd_params.warmup = false;
         g_mtmd = mtmd_init_from_file(projector.c_str(), g_model, mtmd_params);
@@ -323,7 +697,7 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     }
     g_load_progress.store(0.96f, std::memory_order_relaxed);
 
-    g_batch = llama_batch_init(256, 0, 1);
+    g_batch = llama_batch_init(kInferenceBatchCapacity, 0, 1);
     g_batch_initialized = true;
     g_sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
     if (!g_sampler) {
@@ -338,7 +712,104 @@ Java_com_nexora_ai_NativeLlama_loadModel(JNIEnv *env, jobject, jstring model_pat
     llama_sampler_chain_add(g_sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
     g_position = 0;
     g_history.clear();
+    g_thread_count = effective_thread_count;
+    g_model_path = path;
+    const int64_t load_duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - load_started
+    ).count();
+    g_last_load_duration_ns.store(load_duration_ns, std::memory_order_relaxed);
     g_load_progress.store(1.0f, std::memory_order_relaxed);
+    return 0;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_nexora_ai_NativeLlama_isModelLoaded(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    return (g_model != nullptr && g_context != nullptr && g_sampler != nullptr && g_batch_initialized) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_nexora_ai_NativeLlama_activePath(JNIEnv *env, jobject) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    return to_java_string(env, g_model != nullptr ? g_model_path : "");
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_nexora_ai_NativeLlama_restoreHistory(JNIEnv *env, jobject, jstring system_prompt,
+                                               jobjectArray roles, jobjectArray contents) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    clear_error();
+    if (!g_model || !g_context || !g_sampler) {
+        set_error("Muat model GGUF sebelum memulihkan riwayat.");
+        return -1;
+    }
+    if (g_generation_active || g_inference_phase.load(std::memory_order_relaxed) != 0) {
+        set_error("Tidak dapat memulihkan riwayat ketika inference masih aktif.");
+        return -2;
+    }
+    if (!g_batch_initialized) {
+        set_error("Batch native belum siap untuk memulihkan riwayat.");
+        return -8;
+    }
+    if (system_prompt == nullptr || roles == nullptr || contents == nullptr) {
+        set_error("Data riwayat tidak valid.");
+        return -3;
+    }
+    const jsize role_count = env->GetArrayLength(roles);
+    const jsize content_count = env->GetArrayLength(contents);
+    if (role_count != content_count || role_count > 4096) {
+        set_error("Jumlah pesan riwayat tidak valid.");
+        return -4;
+    }
+
+    const std::string restored_system_prompt = from_java_string(env, system_prompt);
+    std::vector<std::pair<std::string, std::string>> restored_history;
+    restored_history.reserve(static_cast<size_t>(role_count));
+    for (jsize index = 0; index < role_count; ++index) {
+        auto role_value = static_cast<jstring>(env->GetObjectArrayElement(roles, index));
+        auto content_value = static_cast<jstring>(env->GetObjectArrayElement(contents, index));
+        if (env->ExceptionCheck() || role_value == nullptr || content_value == nullptr) {
+            if (role_value != nullptr) env->DeleteLocalRef(role_value);
+            if (content_value != nullptr) env->DeleteLocalRef(content_value);
+            env->ExceptionClear();
+            set_error("Pesan riwayat tidak dapat dibaca dari Android.");
+            return -5;
+        }
+        const std::string role = from_java_string(env, role_value);
+        const std::string content = from_java_string(env, content_value);
+        env->DeleteLocalRef(role_value);
+        env->DeleteLocalRef(content_value);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            set_error("String pesan riwayat tidak dapat dikonversi.");
+            return -9;
+        }
+        if (role != "user" && role != "assistant") {
+            set_error("Peran pesan riwayat tidak dikenal.");
+            return -6;
+        }
+        restored_history.emplace_back(role, content);
+    }
+
+    llama_memory_clear(llama_get_memory(g_context), true);
+    g_position = 0;
+    g_kv_cache_tokens.clear();
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+    g_history = std::move(restored_history);
+    g_system_prompt = restored_system_prompt;
+    g_pending_user.clear();
+    g_pending_response.clear();
+    g_utf8_pending.clear();
+    g_remaining_tokens = 0;
+    g_cancel_requested.store(false, std::memory_order_relaxed);
+    g_generation_cancelled.store(false, std::memory_order_relaxed);
+    g_generation_active = false;
+    g_prompt_processed.store(0, std::memory_order_relaxed);
+    g_prompt_total.store(0, std::memory_order_relaxed);
+    g_generated_tokens.store(0, std::memory_order_relaxed);
+    g_generation_limit.store(0, std::memory_order_relaxed);
+    llama_sampler_reset(g_sampler);
+    g_inference_phase.store(0, std::memory_order_relaxed);
     return 0;
 }
 
@@ -355,16 +826,209 @@ Java_com_nexora_ai_NativeLlama_contextSize(JNIEnv *, jobject) {
 
 extern "C" JNIEXPORT jintArray JNICALL
 Java_com_nexora_ai_NativeLlama_inferenceStats(JNIEnv *env, jobject) {
-    const jint values[5] = {
+    const jint values[6] = {
         g_inference_phase.load(std::memory_order_relaxed),
         g_prompt_processed.load(std::memory_order_relaxed),
         g_prompt_total.load(std::memory_order_relaxed),
         g_generated_tokens.load(std::memory_order_relaxed),
-        g_generation_limit.load(std::memory_order_relaxed)
+        g_generation_limit.load(std::memory_order_relaxed),
+        g_prompt_cache_reused.load(std::memory_order_relaxed)
     };
-    jintArray result = env->NewIntArray(5);
-    if (result != nullptr) env->SetIntArrayRegion(result, 0, 5, values);
+    jintArray result = env->NewIntArray(6);
+    if (result != nullptr) env->SetIntArrayRegion(result, 0, 6, values);
     return result;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_nexora_ai_NativeLlama_runBenchmark(JNIEnv *env, jobject, jstring prompt, jint max_tokens) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    clear_error();
+
+    if (!g_model || !g_context || !g_sampler || !g_batch_initialized) {
+        set_error("Muat model GGUF sebelum menjalankan benchmark.");
+        return -1;
+    }
+    if (g_generation_active) {
+        set_error("Selesaikan atau hentikan generasi aktif sebelum benchmark.");
+        return -2;
+    }
+    if (prompt == nullptr) {
+        set_error("Prompt benchmark tidak valid.");
+        return -3;
+    }
+
+    const std::string benchmark_prompt = from_java_string(env, prompt);
+    const int32_t token_limit = std::clamp(static_cast<int32_t>(max_tokens), 1, 128);
+    if (benchmark_prompt.empty() || token_limit <= 0) {
+        set_error("Prompt atau batas token benchmark tidak valid.");
+        return -3;
+    }
+
+    // Benchmark uses the loaded model/context, then restores native conversation
+    // history. The next chat turn rebuilds KV from that preserved history.
+    std::vector<std::pair<std::string, std::string>> saved_history = g_history;
+    const std::string saved_system_prompt = g_system_prompt;
+    const std::string saved_pending_user = g_pending_user;
+    const std::string saved_pending_response = g_pending_response;
+    const std::string saved_utf8_pending = g_utf8_pending;
+    const int32_t saved_remaining_tokens = g_remaining_tokens;
+    const bool saved_generation_active = g_generation_active;
+    const int32_t saved_prompt_processed = g_prompt_processed.load(std::memory_order_relaxed);
+    const int32_t saved_prompt_total = g_prompt_total.load(std::memory_order_relaxed);
+    const int32_t saved_generated_tokens = g_generated_tokens.load(std::memory_order_relaxed);
+    const int32_t saved_generation_limit = g_generation_limit.load(std::memory_order_relaxed);
+    const int32_t saved_inference_phase = g_inference_phase.load(std::memory_order_relaxed);
+    auto restore_conversation = [&]() {
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+        g_history = std::move(saved_history);
+        g_system_prompt = saved_system_prompt;
+        g_generation_active = saved_generation_active;
+        g_remaining_tokens = saved_remaining_tokens;
+        g_pending_user = saved_pending_user;
+        g_pending_response = saved_pending_response;
+        g_utf8_pending = saved_utf8_pending;
+        g_prompt_processed.store(saved_prompt_processed, std::memory_order_relaxed);
+        g_prompt_total.store(saved_prompt_total, std::memory_order_relaxed);
+        g_generated_tokens.store(saved_generated_tokens, std::memory_order_relaxed);
+        g_generation_limit.store(saved_generation_limit, std::memory_order_relaxed);
+        llama_sampler_reset(g_sampler);
+        g_inference_phase.store(saved_inference_phase, std::memory_order_relaxed);
+    };
+
+    llama_memory_clear(llama_get_memory(g_context), true);
+    g_position = 0;
+    g_kv_cache_tokens.clear();
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+    g_history.clear();
+    g_system_prompt = "You are running a fixed on-device inference benchmark. Answer in Indonesian.";
+    g_pending_user.clear();
+    g_pending_response.clear();
+    g_utf8_pending.clear();
+    g_generated_tokens.store(0, std::memory_order_relaxed);
+    g_generation_limit.store(token_limit, std::memory_order_relaxed);
+    g_benchmark_metrics = {};
+    g_benchmark_metrics.context_size = g_context_size;
+    g_benchmark_metrics.thread_count = g_thread_count;
+
+    const std::string formatted = format_prompt_locked(benchmark_prompt);
+    if (formatted.empty()) {
+        if (g_last_error.empty()) set_error("Prompt benchmark kosong setelah pemformatan.");
+        restore_conversation();
+        return -4;
+    }
+
+    const std::vector<llama_token> tokens = tokenize_locked(formatted);
+    if (!g_last_error.empty() || tokens.empty()) {
+        if (g_last_error.empty()) set_error("Prompt benchmark tidak menghasilkan token.");
+        restore_conversation();
+        return -5;
+    }
+    if (tokens.size() >= static_cast<size_t>(g_context_size)) {
+        set_error("Prompt benchmark melebihi context model.");
+        restore_conversation();
+        return -6;
+    }
+
+    g_benchmark_metrics.prompt_tokens = static_cast<int64_t>(tokens.size());
+    g_prompt_processed.store(0, std::memory_order_relaxed);
+    g_prompt_total.store(static_cast<int32_t>(tokens.size()), std::memory_order_relaxed);
+    g_inference_phase.store(1, std::memory_order_relaxed);
+
+    g_benchmark_metrics.prefill_start_ns = monotonic_time_ns();
+    const bool prefill_ok = decode_tokens_locked(tokens);
+    g_benchmark_metrics.prefill_end_ns = monotonic_time_ns();
+    if (!prefill_ok) {
+        restore_conversation();
+        return -7;
+    }
+
+    llama_sampler_reset(g_sampler);
+    g_inference_phase.store(2, std::memory_order_relaxed);
+    g_generated_tokens.store(0, std::memory_order_relaxed);
+    g_benchmark_metrics.decode_start_ns = monotonic_time_ns();
+
+    int32_t generated = 0;
+    int32_t decode_result = 0;
+    int64_t stop_flags = 0;
+    const llama_vocab *vocab = llama_model_get_vocab(g_model);
+    // g_position is the next free KV position. Position context_size - 1 is valid.
+    while (generated < token_limit && g_position < g_context_size) {
+        const llama_token token = llama_sampler_sample(g_sampler, g_context, -1);
+        llama_sampler_accept(g_sampler, token);
+        if (llama_vocab_is_eog(vocab, token)) {
+            stop_flags |= kBenchmarkStopEos;
+            break;
+        }
+
+        g_batch.n_tokens = 1;
+        g_batch.token[0] = token;
+        g_batch.pos[0] = g_position;
+        g_batch.n_seq_id[0] = 1;
+        g_batch.seq_id[0][0] = 0;
+        g_batch.logits[0] = 1;
+
+        decode_result = llama_decode(g_context, g_batch);
+        if (decode_result != 0) {
+            stop_flags |= kBenchmarkStopDecodeError;
+            set_error("llama_decode gagal saat benchmark (kode " +
+                      std::to_string(decode_result) + ").");
+            break;
+        }
+        ++g_position;
+        ++generated;
+        g_generated_tokens.store(generated, std::memory_order_relaxed);
+    }
+
+    if (decode_result == 0) {
+        if (generated >= token_limit) stop_flags |= kBenchmarkStopOutputLimit;
+        if (g_position >= g_context_size) stop_flags |= kBenchmarkStopContextLimit;
+    }
+    g_benchmark_metrics.decode_end_ns = monotonic_time_ns();
+    g_benchmark_metrics.generated_tokens = generated;
+    g_benchmark_metrics.stop_flags = stop_flags;
+    g_benchmark_metrics.peak_rss_bytes = process_peak_rss_bytes();
+    restore_conversation();
+
+    if (decode_result != 0) return -8;
+    return 0;
+}
+
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_nexora_ai_NativeLlama_benchmarkStats(JNIEnv *env, jobject) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    const jlong values[11] = {
+        static_cast<jlong>(g_last_load_duration_ns.load(std::memory_order_relaxed)),
+        static_cast<jlong>(g_benchmark_metrics.prefill_start_ns),
+        static_cast<jlong>(g_benchmark_metrics.prefill_end_ns),
+        static_cast<jlong>(g_benchmark_metrics.prompt_tokens),
+        static_cast<jlong>(g_benchmark_metrics.decode_start_ns),
+        static_cast<jlong>(g_benchmark_metrics.decode_end_ns),
+        static_cast<jlong>(g_benchmark_metrics.generated_tokens),
+        static_cast<jlong>(g_benchmark_metrics.peak_rss_bytes),
+        static_cast<jlong>(g_benchmark_metrics.stop_flags),
+        static_cast<jlong>(g_benchmark_metrics.context_size),
+        static_cast<jlong>(g_benchmark_metrics.thread_count)
+    };
+    jlongArray result = env->NewLongArray(11);
+    if (result != nullptr) env->SetLongArrayRegion(result, 0, 11, values);
+    return result;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_nexora_ai_NativeLlama_benchmarkModelQuantization(JNIEnv *env, jobject) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    if (!g_model) return to_java_string(env, "");
+    const char *quantization = llama_ftype_name(llama_model_ftype(g_model));
+    return to_java_string(env, quantization != nullptr ? quantization : "");
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_nexora_ai_NativeLlama_chatTemplateWarning(JNIEnv *env, jobject) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    return to_java_string(env, g_chat_template_warning);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -379,6 +1043,8 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
                                                  jint max_tokens) {
     std::lock_guard<std::mutex> guard(g_mutex);
     clear_error();
+    g_cancel_requested.store(false, std::memory_order_relaxed);
+    g_generation_cancelled.store(false, std::memory_order_relaxed);
     g_inference_phase.store(0, std::memory_order_relaxed);
     if (!g_model || !g_context || !g_sampler) {
         set_error("Muat model GGUF terlebih dahulu.");
@@ -421,6 +1087,8 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
     // Image turns are one-shot: their embeddings are not persisted in text history.
     llama_memory_clear(llama_get_memory(g_context), true);
     g_position = 0;
+    g_kv_cache_tokens.clear();
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
     g_history.clear();
     g_system_prompt = next_system;
 
@@ -466,23 +1134,39 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
         return -11;
     }
 
+    // Expose a cancellable native phase before MTMD tokenization/encoding starts.
+    g_prompt_total.store(0, std::memory_order_relaxed);
+    g_prompt_processed.store(0, std::memory_order_relaxed);
+    g_inference_phase.store(1, std::memory_order_relaxed);
     const int32_t tokenize_result = mtmd_tokenize_from_parts(
         g_mtmd, chunks, part_ptrs, 3, true
     );
     if (tokenize_result != 0) {
+        const bool was_cancelled = g_cancel_requested.exchange(false, std::memory_order_relaxed);
+        if (was_cancelled) {
+            g_generation_cancelled.store(true, std::memory_order_relaxed);
+            set_error("Analisis vision dihentikan oleh pengguna.");
+        } else {
+            set_error("Preprocessing vision gagal (kode " + std::to_string(tokenize_result) + ").");
+        }
         mtmd_input_chunks_free(chunks);
         mtmd_bitmap_free(bitmap_wrapper.bitmap);
         if (bitmap_wrapper.video_ctx != nullptr) mtmd_helper_video_free(bitmap_wrapper.video_ctx);
-        set_error("Preprocessing vision gagal (kode " + std::to_string(tokenize_result) + ").");
+        g_inference_phase.store(0, std::memory_order_relaxed);
         return -12;
     }
 
     const size_t chunk_count = mtmd_input_chunks_size(chunks);
     g_prompt_total.store(static_cast<int32_t>(chunk_count), std::memory_order_relaxed);
     g_prompt_processed.store(0, std::memory_order_relaxed);
-    g_inference_phase.store(1, std::memory_order_relaxed);
     bool evaluated = chunk_count > 0;
     for (size_t index = 0; evaluated && index < chunk_count; ++index) {
+        if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+            g_generation_cancelled.store(true, std::memory_order_relaxed);
+            set_error("Analisis vision dihentikan oleh pengguna.");
+            evaluated = false;
+            break;
+        }
         const mtmd_input_chunk *chunk = mtmd_input_chunks_get(chunks, index);
         llama_pos next_position = g_position;
         const int32_t result = mtmd_helper_eval_chunk_single(
@@ -490,8 +1174,19 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
             index + 1 == chunk_count, &next_position
         );
         if (result != 0) {
-            set_error("Encoder/decode vision gagal pada chunk " + std::to_string(index) +
-                      " (kode " + std::to_string(result) + ").");
+            if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+                g_generation_cancelled.store(true, std::memory_order_relaxed);
+                set_error("Analisis vision dihentikan oleh pengguna.");
+            } else {
+                set_error("Encoder/decode vision gagal pada chunk " + std::to_string(index) +
+                          " (kode " + std::to_string(result) + ").");
+            }
+            evaluated = false;
+            break;
+        }
+        if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+            g_generation_cancelled.store(true, std::memory_order_relaxed);
+            set_error("Analisis vision dihentikan oleh pengguna.");
             evaluated = false;
             break;
         }
@@ -503,17 +1198,33 @@ Java_com_nexora_ai_NativeLlama_startVisionPrompt(JNIEnv *env, jobject, jstring s
     mtmd_bitmap_free(bitmap_wrapper.bitmap);
     if (bitmap_wrapper.video_ctx != nullptr) mtmd_helper_video_free(bitmap_wrapper.video_ctx);
 
+    if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+        g_generation_cancelled.store(true, std::memory_order_relaxed);
+        set_error("Analisis vision dihentikan oleh pengguna.");
+        evaluated = false;
+    }
     if (!evaluated) {
         llama_memory_clear(llama_get_memory(g_context), true);
         g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_inference_phase.store(0, std::memory_order_relaxed);
         if (g_last_error.empty()) set_error("Vision tidak menghasilkan chunk multimodal.");
         return -13;
+    }
+
+    if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+        g_generation_cancelled.store(true, std::memory_order_relaxed);
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        set_error("Analisis vision dihentikan oleh pengguna.");
+        return -15;
     }
 
     const int32_t requested_tokens = std::max(1, std::min(1024, static_cast<int32_t>(max_tokens)));
     if (g_position + requested_tokens >= g_context_size) {
         llama_memory_clear(llama_get_memory(g_context), true);
         g_position = 0;
+        g_kv_cache_tokens.clear();
         set_error("Gambar dan prompt terlalu besar untuk context model ini.");
         return -14;
     }
@@ -535,6 +1246,9 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
                                             jstring user_message, jint max_tokens) {
     std::lock_guard<std::mutex> guard(g_mutex);
     clear_error();
+    g_cancel_requested.store(false, std::memory_order_relaxed);
+    g_generation_cancelled.store(false, std::memory_order_relaxed);
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
     g_inference_phase.store(0, std::memory_order_relaxed);
     if (!g_model || !g_context || !g_sampler) {
         set_error("Impor dan muat model GGUF terlebih dahulu."); return -1;
@@ -549,14 +1263,15 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
 
     if (next_system != g_system_prompt) {
         g_history.clear();
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
         g_system_prompt = next_system;
     }
 
-    // Chat templates render the complete transcript. Rebuild the KV cache from
-    // that transcript on every turn so previous tokens are never appended twice.
-    llama_memory_clear(llama_get_memory(g_context), true);
-    g_position = 0;
-
+    // Render the full transcript, then reuse only the exact token prefix already
+    // represented in sequence 0 and evaluate the remaining suffix.
     const std::string formatted = format_prompt_locked(user);
     if (formatted.empty()) {
         if (g_last_error.empty()) set_error("Prompt kosong setelah pemformatan.");
@@ -573,10 +1288,56 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
         set_error("Prompt melebihi context model. Kurangi panjang pesan atau gunakan context yang lebih besar.");
         return -8;
     }
-    if (!decode_tokens_locked(tokens)) {
+
+    const size_t reused_tokens = prepare_prompt_kv_locked(tokens);
+    const std::vector<llama_token> prompt_suffix(
+        tokens.begin() + static_cast<std::ptrdiff_t>(reused_tokens),
+        tokens.end()
+    );
+    if (prompt_suffix.empty()) {
+        set_error("Cache prompt tidak menyisakan token untuk menyiapkan logits.");
         llama_memory_clear(llama_get_memory(g_context), true);
         g_position = 0;
+        g_kv_cache_tokens.clear();
         return -9;
+    }
+    g_pending_user = user;
+    g_pending_response.clear();
+    g_utf8_pending.clear();
+    if (!decode_tokens_locked(prompt_suffix)) {
+        const bool was_cancelled = g_generation_cancelled.load(std::memory_order_relaxed);
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+        if (was_cancelled) {
+            g_history.emplace_back("user", g_pending_user);
+            g_history.emplace_back("assistant", g_pending_response);
+        }
+        g_pending_user.clear();
+        g_pending_response.clear();
+        g_utf8_pending.clear();
+        g_inference_phase.store(0, std::memory_order_relaxed);
+        return -9;
+    }
+    g_kv_cache_tokens.insert(
+        g_kv_cache_tokens.end(), prompt_suffix.begin(), prompt_suffix.end()
+    );
+
+    if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+        g_generation_cancelled.store(true, std::memory_order_relaxed);
+        set_error("Generasi dihentikan oleh pengguna saat menyiapkan prompt.");
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+        g_history.emplace_back("user", g_pending_user);
+        g_history.emplace_back("assistant", g_pending_response);
+        g_pending_user.clear();
+        g_pending_response.clear();
+        g_utf8_pending.clear();
+        g_inference_phase.store(0, std::memory_order_relaxed);
+        return -11;
     }
 
     const int32_t available_tokens = std::max(0, g_context_size - g_position - 1);
@@ -584,14 +1345,16 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
     if (effective_tokens <= 0) {
         llama_memory_clear(llama_get_memory(g_context), true);
         g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+        g_pending_user.clear();
+        g_pending_response.clear();
+        g_utf8_pending.clear();
         set_error("Tidak ada ruang context tersisa untuk menghasilkan token. Mulai chat baru atau pilih context yang lebih besar.");
         return -10;
     }
 
     llama_sampler_reset(g_sampler);
-    g_pending_user = user;
-    g_pending_response.clear();
-    g_utf8_pending.clear();
     g_remaining_tokens = effective_tokens;
     g_generated_tokens.store(0, std::memory_order_relaxed);
     g_generation_limit.store(effective_tokens, std::memory_order_relaxed);
@@ -603,6 +1366,10 @@ Java_com_nexora_ai_NativeLlama_startPrompt(JNIEnv *env, jobject, jstring system_
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_nexora_ai_NativeLlama_nextToken(JNIEnv *env, jobject) {
     std::lock_guard<std::mutex> guard(g_mutex);
+    if (g_cancel_requested.load(std::memory_order_relaxed)) {
+        cancel_generation_locked();
+        return nullptr;
+    }
     if (!g_generation_active || !g_context || !g_sampler) return nullptr;
     if (g_remaining_tokens <= 0 || g_position >= g_context_size - 1) {
         finish_generation_locked(); return nullptr;
@@ -620,11 +1387,27 @@ Java_com_nexora_ai_NativeLlama_nextToken(JNIEnv *env, jobject) {
     g_batch.logits[0] = 1;
     const int32_t result = llama_decode(g_context, g_batch);
     if (result != 0) {
+        if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+            cancel_generation_locked();
+            return nullptr;
+        }
         set_error("llama_decode gagal saat generasi (kode " + std::to_string(result) + ").");
-        finish_generation_locked(); return nullptr;
+        llama_memory_clear(llama_get_memory(g_context), true);
+        g_position = 0;
+        g_kv_cache_tokens.clear();
+        g_prompt_cache_reused.store(0, std::memory_order_relaxed);
+        finish_generation_locked();
+        return nullptr;
+    }
+    // Vulkan does not use llama.cpp's CPU-only abort callback. Honour Stop
+    // immediately after the currently executing decode call returns.
+    if (g_cancel_requested.exchange(false, std::memory_order_relaxed)) {
+        cancel_generation_locked();
+        return nullptr;
     }
     ++g_position;
     --g_remaining_tokens;
+    g_kv_cache_tokens.push_back(token);
     g_generated_tokens.fetch_add(1, std::memory_order_relaxed);
 
     char piece[256];
@@ -648,6 +1431,29 @@ Java_com_nexora_ai_NativeLlama_nextToken(JNIEnv *env, jobject) {
     return to_java_string(env, ready);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_nexora_ai_NativeLlama_cancelGeneration(JNIEnv *, jobject) {
+    g_cancel_requested.store(true, std::memory_order_relaxed);
+
+    // Never block the UI behind llama_decode(). If native inference owns the
+    // mutex, CPU builds observe the request through native_abort_callback.
+    std::unique_lock<std::mutex> guard(g_mutex, std::try_to_lock);
+    if (!guard.owns_lock()) return;
+
+    const bool work_active =
+        g_generation_active || g_inference_phase.load(std::memory_order_relaxed) != 0;
+    if (work_active) {
+        cancel_generation_locked();
+    } else {
+        g_cancel_requested.store(false, std::memory_order_relaxed);
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_nexora_ai_NativeLlama_generationWasCancelled(JNIEnv *, jobject) {
+    return g_generation_cancelled.load(std::memory_order_relaxed) ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_nexora_ai_NativeLlama_lastError(JNIEnv *env, jobject) {
     std::lock_guard<std::mutex> guard(g_mutex);
@@ -657,8 +1463,12 @@ Java_com_nexora_ai_NativeLlama_lastError(JNIEnv *env, jobject) {
 extern "C" JNIEXPORT void JNICALL
 Java_com_nexora_ai_NativeLlama_resetChat(JNIEnv *, jobject) {
     std::lock_guard<std::mutex> guard(g_mutex);
+    g_cancel_requested.store(false, std::memory_order_relaxed);
+    g_generation_cancelled.store(false, std::memory_order_relaxed);
     if (g_context) llama_memory_clear(llama_get_memory(g_context), true);
     g_position = 0;
+    g_kv_cache_tokens.clear();
+    g_prompt_cache_reused.store(0, std::memory_order_relaxed);
     g_history.clear();
     g_generation_active = false;
     g_pending_user.clear();

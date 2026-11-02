@@ -3,10 +3,32 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val releaseStoreFile = providers.environmentVariable("NEXORA_RELEASE_STORE_FILE").orNull
+val releaseStorePassword = providers.environmentVariable("NEXORA_RELEASE_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("NEXORA_RELEASE_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("NEXORA_RELEASE_KEY_PASSWORD").orNull
+val hasReleaseSigning = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "com.nexora.ai"
     compileSdk = 36
     ndkVersion = "29.0.13113456"
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("nexoraRelease") {
+                storeFile = file(requireNotNull(releaseStoreFile))
+                storePassword = requireNotNull(releaseStorePassword)
+                keyAlias = requireNotNull(releaseKeyAlias)
+                keyPassword = requireNotNull(releaseKeyPassword)
+            }
+        }
+    }
 
     defaultConfig {
         applicationId = "com.nexora.ai"
@@ -37,6 +59,34 @@ android {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
             version = "3.31.6"
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("nexoraRelease")
+            } else {
+                // A debug certificate keeps local/CI release builds installable.
+                // Production distribution must provide all NEXORA_RELEASE_* values.
+                signingConfigs.getByName("debug")
+            }
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            externalNativeBuild {
+                cmake {
+                    // Do not rely on cppFlags: force the complete native dependency
+                    // graph and our JNI target to use a Release CMake configuration.
+                    arguments += listOf(
+                        "-DCMAKE_BUILD_TYPE=Release",
+                        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+                    )
+                }
+            }
         }
     }
 
@@ -72,6 +122,7 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
